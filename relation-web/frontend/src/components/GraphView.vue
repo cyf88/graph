@@ -1,31 +1,39 @@
 <template>
   <div class="graph-wrap">
     <div v-if="nodes.length === 0" class="empty">暂无数据</div>
-    <div v-show="nodes.length > 0" ref="chartRef" class="graph"></div>
+    <div v-show="nodes.length > 0" ref="containerRef" class="graph"></div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
-import * as echarts from 'echarts'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import G6 from '@antv/g6'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
   edges: { type: Array, default: () => [] }
 })
 
-const chartRef = ref(null)
-let chart = null
+const containerRef = ref(null)
+let graph = null
+
+const EDGE_COLORS = {
+  FATHER_OF: '#409EFF',
+  MOTHER_OF: '#F56C6C',
+  MARRIED_TO: '#E6A23C'
+}
 
 /**
  * 计算族谱树布局：
- * 配偶视为同一“家庭单元”（同一层级），父子/母子关系决定代际（父/母在上、子女在下）。
- * 返回 Map<id, {x, y}>，y 表示代际（0 为最顶层），x 为同层横向位置。
+ * 1. 配偶合并为同一“家庭单元”（并查集），父子/母子关系决定代际；
+ * 2. 自底向上让每个家庭单元居中到其子女上方；
+ * 3. 家庭单元内：有父辈的“血缘成员”放在单元中心，其配偶放在右侧。
+ * 返回 Map<id, {x, y}>。
  */
 function computeTreeLayout(nodes, edges) {
   const ids = nodes.map(n => n.id)
 
-  // 并查集：把配偶关系连成同一家庭单元
+  // 并查集：配偶 -> 同一家庭单元
   const parent = new Map(ids.map(id => [id, id]))
   const find = (x) => {
     let r = x
@@ -52,145 +60,232 @@ function computeTreeLayout(nodes, edges) {
     }
   }
 
-  // 家庭单元之间的父子关系
-  const compChildren = new Map()
-  const compParents = new Map()
+  const anchorIds = new Set() // 有父辈的成员（血缘锚点）
+  const unitChildren = new Map()
+  const unitParents = new Map()
   for (const [p, c] of childEdges) {
     const pc = find(p)
     const cc = find(c)
     if (pc === cc) continue
-    if (!compChildren.has(pc)) compChildren.set(pc, [])
-    compChildren.get(pc).push(cc)
-    if (!compParents.has(cc)) compParents.set(cc, new Set())
-    compParents.get(cc).add(pc)
+    anchorIds.add(c)
+    if (!unitChildren.has(pc)) unitChildren.set(pc, [])
+    unitChildren.get(pc).push(cc)
+    if (!unitParents.has(cc)) unitParents.set(cc, new Set())
+    unitParents.get(cc).add(pc)
   }
 
-  // BFS 计算家庭单元代际
-  const allComps = new Set(ids.map(id => find(id)))
-  const compLevel = new Map()
-  const roots = [...allComps].filter(c => !compParents.has(c))
-  const queue = [...roots]
-  roots.forEach(r => compLevel.set(r, 0))
+  // 代际（BFS）
+  const allUnits = new Set(ids.map(id => find(id)))
+  const unitLevel = new Map()
+  const unitRoots = [...allUnits].filter(u => !unitParents.has(u))
+  const queue = [...unitRoots]
+  unitRoots.forEach(r => unitLevel.set(r, 0))
   while (queue.length) {
-    const cur = queue.shift()
-    const lv = compLevel.get(cur)
-    for (const child of (compChildren.get(cur) || [])) {
-      if (!compLevel.has(child)) {
-        compLevel.set(child, lv + 1)
-        queue.push(child)
+    const u = queue.shift()
+    const lv = unitLevel.get(u)
+    for (const c of (unitChildren.get(u) || [])) {
+      if (!unitLevel.has(c)) {
+        unitLevel.set(c, lv + 1)
+        queue.push(c)
       }
     }
   }
-  allComps.forEach(c => { if (!compLevel.has(c)) compLevel.set(c, 0) })
+  allUnits.forEach(u => { if (!unitLevel.has(u)) unitLevel.set(u, 0) })
 
-  // 每个节点的代际
-  const nodeLevel = new Map()
-  ids.forEach(id => nodeLevel.set(id, compLevel.get(find(id))))
+  // 自底向上分配横向位置（叶子依次排开，父单元居中到子女上方）
+  const unitX = new Map()
+  let leafCounter = 0
+  function assignX(u) {
+    if (unitX.has(u)) return unitX.get(u)
+    const kids = (unitChildren.get(u) || []).filter(k => k !== u)
+    let cx
+    if (kids.length === 0) {
+      cx = leafCounter++
+    } else {
+      const xs = kids.map(k => assignX(k))
+      cx = (Math.min(...xs) + Math.max(...xs)) / 2
+    }
+    unitX.set(u, cx)
+    return cx
+  }
+  unitRoots.forEach(r => assignX(r))
+  allUnits.forEach(u => { if (!unitX.has(u)) unitX.set(u, leafCounter++) })
 
-  // 按代际分组
-  const byLevel = new Map()
-  nodes.forEach(n => {
-    const lv = nodeLevel.get(n.id)
-    if (!byLevel.has(lv)) byLevel.set(lv, [])
-    byLevel.get(lv).push(n)
+  // 节点坐标
+  const colGap = 200
+  const rowGap = 140
+  const memberGap = 180
+  const unitMembers = new Map()
+  ids.forEach(id => {
+    const u = find(id)
+    if (!unitMembers.has(u)) unitMembers.set(u, [])
+    unitMembers.get(u).push(id)
   })
 
-  // 分配坐标（同层横向排列，夫妻相邻）
   const pos = new Map()
-  const rowGap = 140
-  const colGap = 160
-  const levels = [...byLevel.keys()].sort((a, b) => a - b)
-  for (const lv of levels) {
-    const arr = byLevel.get(lv).sort((a, b) => {
-      const ca = find(a.id)
-      const cb = find(b.id)
-      if (ca !== cb) return ca.localeCompare(cb)
-      return a.id.localeCompare(b.id)
-    })
-    const total = (arr.length - 1) * colGap
-    arr.forEach((n, i) => {
-      pos.set(n.id, { x: i * colGap - total / 2, y: lv * rowGap })
-    })
+  for (const [u, members] of unitMembers) {
+    const cx = unitX.get(u) * colGap
+    const y = unitLevel.get(u) * rowGap
+    if (members.length === 1) {
+      pos.set(members[0], { x: cx, y })
+    } else {
+      const anchor = members.find(m => anchorIds.has(m))
+      if (anchor) {
+        // 血缘成员在单元中心，配偶在右侧
+        const spouse = members.find(m => m !== anchor)
+        pos.set(anchor, { x: cx, y })
+        pos.set(spouse, { x: cx + memberGap, y })
+      } else {
+        // 顶层夫妻：围绕中心对称排布
+        const sorted = [...members].sort()
+        const total = (sorted.length - 1) * memberGap
+        sorted.forEach((m, i) => {
+          pos.set(m, { x: cx + i * memberGap - total / 2, y })
+        })
+      }
+    }
   }
   return pos
 }
 
-function renderChart() {
-  if (!chart || !chartRef.value) return
-  if (props.nodes.length === 0) {
-    chart.clear()
-    return
+function buildNodeStyle(n) {
+  if (n.center) {
+    return { fill: '#FF9800', stroke: '#FFD54F', lineWidth: 3 }
   }
+  if (n.xbdm === '1') {
+    return { fill: '#409EFF', stroke: '#79BBFF', lineWidth: 2 }
+  }
+  return { fill: '#F56C6C', stroke: '#F89898', lineWidth: 2 }
+}
+
+function initGraph() {
+  if (!containerRef.value) return
+  const width = containerRef.value.clientWidth || 800
+  graph = new G6.Graph({
+    container: containerRef.value,
+    width,
+    height: 520,
+    fitView: true,
+    pixelRatio: 1,
+    minZoom: 0.3,
+    maxZoom: 4,
+    defaultNode: {
+      type: 'circle',
+      size: 46,
+      labelCfg: {
+        position: 'bottom',
+        offset: 10,
+        style: { fill: '#eee', fontSize: 13, fontWeight: 500 }
+      }
+    },
+    defaultEdge: {
+      type: 'line',
+      style: {
+        stroke: '#888',
+        lineWidth: 1.8,
+        endArrow: { path: G6.Arrow.triangle(6, 8, 0), fill: '#888' }
+      },
+      labelCfg: {
+        autoRotate: false,
+        style: {
+          fill: '#d5d5d5',
+          fontSize: 11,
+          background: { fill: '#1a1a2e', padding: [2, 5], radius: 3 }
+        }
+      }
+    },
+    modes: {
+      default: ['drag-canvas', 'zoom-canvas', 'drag-node']
+    }
+  })
+
+  // 关闭画布局部刷新（localRefresh），否则缩放/拖拽时 canvas 只重绘局部区域导致拖影
+  graph.get('canvas').set('localRefresh', false)
+
+  graph.on('node:mouseenter', (e) => highlightNeighbors(e.item.getID()))
+  graph.on('node:mouseleave', clearHighlight)
+}
+
+function renderGraph() {
+  if (!containerRef.value) return
+  if (!graph) initGraph()
+  if (!graph) return
 
   const pos = computeTreeLayout(props.nodes, props.edges)
 
-  const data = props.nodes.map(n => {
+  const gNodes = props.nodes.map(n => {
     const p = pos.get(n.id)
     return {
       id: n.id,
-      name: n.name,
-      gmsfhm: n.gmsfhm,
+      label: n.name,
       x: p.x,
       y: p.y,
-      symbolSize: n.center ? 62 : 46,
-      itemStyle: n.center
-        ? { color: '#FF9800', borderColor: '#E65100', borderWidth: 3 }
-        : { color: n.xbdm === '1' ? '#409EFF' : '#F56C6C' }
+      gmsfhm: n.gmsfhm,
+      style: buildNodeStyle(n)
     }
   })
 
-  // 父子/母子关系的箭头指向父母（子女 -> 父母）
-  const links = props.edges.map(e => {
+  const gEdges = props.edges.map(e => {
     const reverse = e.type === 'FATHER_OF' || e.type === 'MOTHER_OF'
-    return {
+    const color = EDGE_COLORS[e.type] || '#888'
+    const edge = {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: { show: true, formatter: e.label || e.type }
+      label: e.label || e.type,
+      style: { stroke: color }
     }
+    if (e.type !== 'MARRIED_TO') {
+      edge.style.endArrow = { path: G6.Arrow.triangle(6, 8, 0), fill: color }
+    }
+    return edge
   })
 
-  chart.setOption({
-    tooltip: {
-      formatter: (p) => {
-        if (p.dataType === 'node') {
-          return `${p.data.name}<br/>身份证号：${p.data.gmsfhm || '-'}`
-        }
-        return p.data.label ? p.data.label.formatter : ''
-      }
-    },
-    series: [{
-      type: 'graph',
-      layout: 'none',
-      data,
-      links,
-      roam: true,
-      draggable: false,
-      label: { show: true, position: 'bottom', fontSize: 13 },
-      edgeLabel: { show: true, fontSize: 10 },
-      edgeSymbol: ['none', 'arrow'],
-      edgeSymbolSize: [4, 10],
-      lineStyle: { color: '#b0b0b0' }
-    }]
-  }, true)
+  graph.data({ nodes: gNodes, edges: gEdges })
+  graph.render()
+  graph.fitView(60)
+}
+
+function highlightNeighbors(nodeId) {
+  const node = graph.findById(nodeId)
+  if (!node) return
+  const neighbors = node.getNeighbors()
+  const neighborIds = new Set([nodeId, ...neighbors.map(n => n.getID())])
+
+  graph.getNodes().forEach(n => {
+    graph.updateItem(n, { style: { opacity: neighborIds.has(n.getID()) ? 1 : 0.12 } })
+  })
+  graph.getEdges().forEach(e => {
+    const m = e.getModel()
+    const related = m.source === nodeId || m.target === nodeId
+    graph.updateItem(e, { style: { opacity: related ? 1 : 0.08 } })
+  })
+}
+
+function clearHighlight() {
+  if (!graph) return
+  graph.getNodes().forEach(n => graph.updateItem(n, { style: { opacity: 1 } }))
+  graph.getEdges().forEach(e => graph.updateItem(e, { style: { opacity: 1 } }))
 }
 
 function onResize() {
-  if (chart) chart.resize()
+  if (graph && containerRef.value) {
+    graph.changeSize(containerRef.value.clientWidth || 800, 520)
+    graph.fitView(60)
+  }
 }
 
 onMounted(() => {
-  chart = echarts.init(chartRef.value)
-  renderChart()
+  nextTick(() => renderGraph())
   window.addEventListener('resize', onResize)
 })
 
-watch(() => [props.nodes, props.edges], renderChart, { deep: true })
+watch(() => [props.nodes, props.edges], () => renderGraph(), { deep: true })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
-  if (chart) {
-    chart.dispose()
-    chart = null
+  if (graph) {
+    graph.destroy()
+    graph = null
   }
 })
 </script>
@@ -198,17 +293,19 @@ onBeforeUnmount(() => {
 <style scoped>
 .graph-wrap {
   width: 100%;
-  border: 1px solid #e4e7ed;
+  border: 1px solid #2a2d3f;
   border-radius: 6px;
   overflow: hidden;
+  background: #0f1226;
 }
 .graph {
   width: 100%;
-  height: 480px;
+  height: 520px;
 }
 .empty {
   padding: 40px;
   text-align: center;
   color: #909399;
+  background: #fff;
 }
 </style>

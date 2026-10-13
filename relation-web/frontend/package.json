@@ -9,8 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@antv/g6": "^4.8.21",
     "axios": "^1.6.8",
-    "echarts": "^5.5.0",
     "vue": "^3.4.21"
   },
   "devDependencies": {
