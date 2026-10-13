@@ -23,6 +23,18 @@ const EDGE_COLORS = {
   MARRIED_TO: '#E6A23C'
 }
 
+// 与户主关系代码 -> 中文
+const REL_LABELS = {
+  '01': '户主',
+  '02': '配偶',
+  '03': '子',
+  '04': '女',
+  '05': '孙子女',
+  '06': '外孙子女',
+  '10': '儿媳',
+  '11': '女婿'
+}
+
 /**
  * 计算族谱树布局：
  * 1. 配偶合并为同一“家庭单元”（并查集），父子/母子关系决定代际；
@@ -161,6 +173,25 @@ function buildNodeStyle(n) {
 function initGraph() {
   if (!containerRef.value) return
   const width = containerRef.value.clientWidth || 800
+
+  // 悬浮提示：显示身份证号等信息
+  const tooltip = new G6.Tooltip({
+    offsetX: 12,
+    offsetY: 12,
+    itemTypes: ['node'],
+    getContent(e) {
+      const m = e.item.getModel()
+      const gender = m.xbdm === '1' ? '男' : (m.xbdm === '2' ? '女' : '-')
+      const rel = REL_LABELS[m.yhzgxdm] || m.yhzgxdm || '-'
+      return `<div style="background:#1c1f36;color:#e8e8ee;padding:10px 14px;border-radius:6px;border:1px solid #3a3f5c;font-size:13px;line-height:1.9;min-width:180px;">
+        <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:2px;">${m.label}</div>
+        <div>身份证号：${m.gmsfhm || '-'}</div>
+        <div>性别：${gender}</div>
+        <div>与户主关系：${rel}</div>
+      </div>`
+    }
+  })
+
   graph = new G6.Graph({
     container: containerRef.value,
     width,
@@ -169,17 +200,19 @@ function initGraph() {
     pixelRatio: 1,
     minZoom: 0.3,
     maxZoom: 4,
+    plugins: [tooltip],
     defaultNode: {
-      type: 'circle',
-      size: 46,
+      type: 'rect',
+      size: [84, 36],
+      // 锚点：上下左右四条边的中点，纵向关系从上下边中点连接
+      anchorPoints: [[0, 0.5], [0.5, 0], [1, 0.5], [0.5, 1]],
       labelCfg: {
-        position: 'bottom',
-        offset: 10,
-        style: { fill: '#eee', fontSize: 13, fontWeight: 500 }
+        position: 'center',
+        style: { fill: '#fff', fontSize: 13, fontWeight: 600 }
       }
     },
     defaultEdge: {
-      type: 'line',
+      type: 'polyline',
       style: {
         stroke: '#888',
         lineWidth: 1.8,
@@ -221,6 +254,9 @@ function renderGraph() {
       x: p.x,
       y: p.y,
       gmsfhm: n.gmsfhm,
+      xbdm: n.xbdm,
+      yhzgxdm: n.yhzgxdm,
+      size: n.center ? [104, 42] : [84, 36],
       style: buildNodeStyle(n)
     }
   })
