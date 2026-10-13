@@ -2,12 +2,11 @@
   <div class="app">
     <header class="header">
       <h1>户籍关系图谱</h1>
-      <p class="subtitle">基于 Neo4j 的家庭亲属关系查询与展示</p>
     </header>
 
     <!-- 需求一：直系亲属 -->
     <section class="card">
-      <h2>需求一 · 查询直系亲属</h2>
+      <h2>查询直系亲属</h2>
       <div class="row">
         <input
           v-model="singleId"
@@ -27,7 +26,7 @@
 
     <!-- 需求二：两人关系 -->
     <section class="card">
-      <h2>需求二 · 查询两人关系</h2>
+      <h2>查询两人关系</h2>
       <div class="row">
         <input
           v-model="idA"
@@ -113,7 +112,6 @@ body { margin: 0; background: #f5f7fa; color: #303133; font-family: "Microsoft Y
 .app { max-width: 960px; margin: 0 auto; padding: 24px; }
 .header { text-align: center; margin-bottom: 24px; }
 .header h1 { margin: 0; font-size: 26px; }
-.subtitle { margin: 8px 0 0; color: #909399; font-size: 14px; }
 .card {
   background: #fff;
   border-radius: 8px;

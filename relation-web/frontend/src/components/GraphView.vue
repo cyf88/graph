@@ -44,6 +44,7 @@ const REL_LABELS = {
  */
 function computeTreeLayout(nodes, edges) {
   const ids = nodes.map(n => n.id)
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
 
   // 并查集：配偶 -> 同一家庭单元
   const parent = new Map(ids.map(id => [id, id]))
@@ -71,6 +72,9 @@ function computeTreeLayout(nodes, edges) {
       childEdges.push([e.source, e.target])
     }
   }
+
+  // 有子女的成员（向下血缘）
+  const parentIds = new Set(childEdges.map(([p]) => p))
 
   const anchorIds = new Set() // 有父辈的成员（血缘锚点）
   const unitChildren = new Map()
@@ -141,33 +145,41 @@ function computeTreeLayout(nodes, edges) {
     if (members.length === 1) {
       pos.set(members[0], { x: cx, y })
     } else {
+      // 血缘主线（锚点）：优先有父辈的；其次有子女的（男性优先）；否则第一个
       const anchor = members.find(m => anchorIds.has(m))
-      if (anchor) {
-        // 血缘成员在单元中心，配偶在右侧
-        const spouse = members.find(m => m !== anchor)
-        pos.set(anchor, { x: cx, y })
-        pos.set(spouse, { x: cx + memberGap, y })
-      } else {
-        // 顶层夫妻：围绕中心对称排布
-        const sorted = [...members].sort()
-        const total = (sorted.length - 1) * memberGap
-        sorted.forEach((m, i) => {
-          pos.set(m, { x: cx + i * memberGap - total / 2, y })
-        })
-      }
+        || members.find(m => parentIds.has(m) && nodeMap.get(m).xbdm === '1')
+        || members.find(m => parentIds.has(m))
+        || members[0]
+      const spouse = members.find(m => m !== anchor)
+      pos.set(anchor, { x: cx, y })
+      pos.set(spouse, { x: cx + memberGap, y })
     }
+  }
+  // 水平居中：让整棵树关于 x=0 对称对齐
+  let minX = Infinity
+  let maxX = -Infinity
+  for (const p of pos.values()) {
+    if (p.x < minX) minX = p.x
+    if (p.x > maxX) maxX = p.x
+  }
+  const offsetX = (minX + maxX) / 2
+  for (const p of pos.values()) {
+    p.x -= offsetX
   }
   return pos
 }
 
 function buildNodeStyle(n) {
-  if (n.center) {
-    return { fill: '#FF9800', stroke: '#FFD54F', lineWidth: 3 }
+  // 基础样式：按性别填充（男蓝女粉）
+  let style = n.xbdm === '1'
+    ? { fill: '#409EFF', stroke: '#79BBFF', lineWidth: 2 }
+    : { fill: '#F56C6C', stroke: '#F89898', lineWidth: 2 }
+
+  // 直系亲属查询的中心节点 / 两人关系查询的端点：仅边框高亮（不改填充色）
+  if (n.center || n.endpoint) {
+    style = { ...style, stroke: '#FFD700', lineWidth: 3 }
   }
-  if (n.xbdm === '1') {
-    return { fill: '#409EFF', stroke: '#79BBFF', lineWidth: 2 }
-  }
-  return { fill: '#F56C6C', stroke: '#F89898', lineWidth: 2 }
+  return style
 }
 
 function initGraph() {
@@ -256,7 +268,7 @@ function renderGraph() {
       gmsfhm: n.gmsfhm,
       xbdm: n.xbdm,
       yhzgxdm: n.yhzgxdm,
-      size: n.center ? [104, 42] : [84, 36],
+      size: [84, 36],
       style: buildNodeStyle(n)
     }
   })
@@ -271,6 +283,9 @@ function renderGraph() {
       style: { stroke: color }
     }
     if (e.type !== 'MARRIED_TO') {
+      // 纵向关系：强制从子女上边中点（anchor 1）连到父母下边中点（anchor 3）
+      edge.sourceAnchor = 1
+      edge.targetAnchor = 3
       edge.style.endArrow = { path: G6.Arrow.triangle(6, 8, 0), fill: color }
     }
     return edge

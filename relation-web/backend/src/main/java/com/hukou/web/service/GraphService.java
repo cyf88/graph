@@ -76,9 +76,9 @@ public class GraphService {
         String query = """
                 MATCH (a:Person {gmsfhm: $from}), (b:Person {gmsfhm: $to})
                 MATCH path = shortestPath((a)-[*..8]-(b))
-                WITH nodes(path) AS ns, relationships(path) AS rs
+                WITH a, b, nodes(path) AS ns, relationships(path) AS rs
                 RETURN
-                  [n IN ns | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm}] AS nodes,
+                  [n IN ns | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, endpoint: n = a OR n = b}] AS nodes,
                   [r IN rs | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
                 """;
 
@@ -112,6 +112,7 @@ public class GraphService {
                     rec.get("gmsfhm").asString(),
                     rec.get("xbdm").asString(),
                     null,
+                    true,
                     true);
             return new GraphResult(true, List.of(node), List.of(),
                     node.name() + " 与 " + node.name() + " 是同一个人");
@@ -124,7 +125,8 @@ public class GraphService {
         for (Map<String, Object> m : list) {
             nodes.add(new GraphNode(s(m.get("id")), s(m.get("name")),
                     s(m.get("gmsfhm")), s(m.get("xbdm")), s(m.get("yhzgxdm")),
-                    Boolean.TRUE.equals(m.get("center"))));
+                    Boolean.TRUE.equals(m.get("center")),
+                    Boolean.TRUE.equals(m.get("endpoint"))));
         }
         return nodes;
     }
