@@ -1,7 +1,22 @@
 <template>
   <div class="graph-wrap">
+    <div class="graph-toolbar">
+      <div>
+        <strong>关系图</strong>
+        <span class="view-hint">{{ viewMode === '3d' ? '拖拽旋转 · 滚轮缩放 · 悬停查看详情' : '拖拽节点或画布 · 滚轮缩放' }}</span>
+      </div>
+      <div class="view-switch" role="group" aria-label="关系图显示模式">
+        <button :class="{ active: viewMode === '2d' }" :aria-pressed="viewMode === '2d'" @click="setViewMode('2d')">2D</button>
+        <button :class="{ active: viewMode === '3d' }" :aria-pressed="viewMode === '3d'" @click="setViewMode('3d')">3D</button>
+      </div>
+    </div>
     <div v-if="nodes.length === 0" class="empty">暂无数据</div>
-    <div v-show="nodes.length > 0" ref="containerRef" class="graph"></div>
+    <template v-else>
+      <div v-show="viewMode === '2d'" ref="containerRef" class="graph"></div>
+      <div v-show="viewMode === '3d'" ref="threeContainerRef" class="graph graph-3d">
+        <div v-if="threeError" class="graph-error">{{ threeError }}</div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -15,7 +30,15 @@ const props = defineProps({
 })
 
 const containerRef = ref(null)
+const threeContainerRef = ref(null)
+const viewMode = ref('2d')
+const threeError = ref('')
 let graph = null
+let graph3d = null
+let graph3dFactory = null
+let THREE = null
+let highlighted3dNodeIds = null
+let graph3dHasFitted = false
 
 const EDGE_COLORS = {
   FATHER_OF: '#409EFF',
@@ -252,7 +275,7 @@ function initGraph() {
 }
 
 function renderGraph() {
-  if (!containerRef.value) return
+  if (!containerRef.value || viewMode.value !== '2d') return
   if (!graph) initGraph()
   if (!graph) return
 
@@ -296,6 +319,173 @@ function renderGraph() {
   graph.fitView(60)
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char])
+}
+
+function hashDepth(id) {
+  let hash = 0
+  for (const char of String(id)) hash = (hash * 31 + char.charCodeAt(0)) | 0
+  return ((Math.abs(hash) % 100) - 50) * 1.2
+}
+
+function build3dData() {
+  const pos = computeTreeLayout(props.nodes, props.edges)
+  const nodes = props.nodes.map(n => {
+    const p = pos.get(n.id) || { x: 0, y: 0 }
+    const gender = n.xbdm === '1' ? '男' : (n.xbdm === '2' ? '女' : '-')
+    const rel = REL_LABELS[n.yhzgxdm] || n.yhzgxdm || '-'
+    return {
+      id: n.id,
+      name: n.name,
+      color: n.xbdm === '1' ? '#409EFF' : '#F56C6C',
+      x: p.x,
+      y: -p.y,
+      z: hashDepth(n.id),
+      gmsfhm: n.gmsfhm,
+      gender,
+      rel
+    }
+  })
+  const links = props.edges.map(e => {
+    const reverse = e.type === 'FATHER_OF' || e.type === 'MOTHER_OF'
+    const color = EDGE_COLORS[e.type] || '#8892a8'
+    return {
+      source: reverse ? e.target : e.source,
+      target: reverse ? e.source : e.target,
+      label: e.label || e.type,
+      color,
+      directional: e.type !== 'MARRIED_TO'
+    }
+  })
+  return { nodes, links }
+}
+
+async function renderGraph3d() {
+  if (!threeContainerRef.value || viewMode.value !== '3d' || props.nodes.length === 0) return
+  threeError.value = ''
+  try {
+    if (!graph3dFactory) {
+      const [module, threeModule] = await Promise.all([import('3d-force-graph'), import('three')])
+      graph3dFactory = module.default
+      THREE = threeModule
+    }
+    if (!graph3d && threeContainerRef.value) {
+      graph3d = new graph3dFactory(threeContainerRef.value, { controlType: 'orbit' })
+        .enableNavigationControls(true)
+        .backgroundColor('#0f1226')
+        .showNavInfo(false)
+        .nodeRelSize(5)
+        .nodeVal(2.2)
+        .nodeColor(node => node.color)
+        .nodeOpacity(0.98)
+        .nodeThreeObject(node => {
+          const canvas = document.createElement('canvas')
+          canvas.width = 256
+          canvas.height = 64
+          const context = canvas.getContext('2d')
+          context.fillStyle = node.color
+          context.font = 'bold 28px "Microsoft YaHei", sans-serif'
+          context.textAlign = 'center'
+          context.textBaseline = 'middle'
+          context.fillText(node.name || '未知', canvas.width / 2, canvas.height / 2, 240)
+          const texture = new THREE.CanvasTexture(canvas)
+          texture.colorSpace = THREE.SRGBColorSpace
+          const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }))
+          label.position.set(0, 11, 0)
+          label.scale.set(42, 10.5, 1)
+          return label
+        })
+        .nodeThreeObjectExtend(true)
+        .nodeLabel(node => `<div style="background:#1c1f36;color:#e8e8ee;padding:10px 14px;border-radius:6px;border:1px solid #3a3f5c;font-size:13px;line-height:1.9;min-width:180px"><strong style="font-size:15px;color:#fff">${escapeHtml(node.name)}</strong><br>身份证号：${escapeHtml(node.gmsfhm || '-')}<br>性别：${escapeHtml(node.gender)}<br>与户主关系：${escapeHtml(node.rel)}</div>`)
+        .linkColor(link => highlighted3dNodeIds && link.source.id && link.target.id
+          && !highlighted3dNodeIds.has(link.source.id) && !highlighted3dNodeIds.has(link.target.id)
+          ? '#777777'
+          : '#ffffff')
+        .linkOpacity(0.82)
+        .linkWidth(0.28)
+        .linkResolution(4)
+        .linkThreeObject(link => {
+          const canvas = document.createElement('canvas')
+          canvas.width = 320
+          canvas.height = 88
+          const context = canvas.getContext('2d')
+          context.fillStyle = '#ffffff'
+          context.font = '300 24px "Microsoft YaHei", sans-serif'
+          context.textAlign = 'center'
+          context.textBaseline = 'middle'
+          context.shadowColor = 'rgba(15, 18, 38, 0.9)'
+          context.shadowBlur = 3
+          context.fillText(link.label || '关系', canvas.width / 2, canvas.height / 2, 296)
+          const texture = new THREE.CanvasTexture(canvas)
+          texture.colorSpace = THREE.SRGBColorSpace
+          const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }))
+          label.scale.set(30, 8.25, 1)
+          return label
+        })
+        .linkThreeObjectExtend(true)
+        .linkPositionUpdate((label, { start, end }) => {
+          label.position.set(
+            (start.x + end.x) / 2,
+            (start.y + end.y) / 2 + 5,
+            (start.z + end.z) / 2
+          )
+          return true
+        })
+        .linkDirectionalArrowLength(link => link.directional ? 3.5 : 0)
+        .linkDirectionalArrowRelPos(0.92)
+        .linkLabel(link => escapeHtml(link.label))
+        .cooldownTicks(140)
+        .onEngineStop(() => {
+          // Fit the first render only; later engine stops must preserve the user's camera zoom.
+          if (!graph3dHasFitted) {
+            graph3dHasFitted = true
+            graph3d?.zoomToFit(650, 90)
+          }
+        })
+        .onNodeHover(node => {
+          const neighbors = new Set(node ? [node.id] : [])
+          if (node) {
+            props.edges.forEach(edge => {
+              if (edge.source === node.id) neighbors.add(edge.target)
+              if (edge.target === node.id) neighbors.add(edge.source)
+            })
+          }
+          highlighted3dNodeIds = node ? neighbors : null
+          graph3d.nodeColor(item => highlighted3dNodeIds && !highlighted3dNodeIds.has(item.id) ? '#34394f' : item.color)
+          graph3d.linkColor(link => highlighted3dNodeIds && link.source.id && link.target.id
+            && !highlighted3dNodeIds.has(link.source.id) && !highlighted3dNodeIds.has(link.target.id)
+            ? '#777777'
+            : '#ffffff')
+        })
+    }
+    // Keep orbit zoom enabled even if controls were reinitialized by the graph engine.
+    const controls = graph3d.controls()
+    if (controls) controls.enableZoom = true
+    graph3d.width(threeContainerRef.value.clientWidth || 800).height(520)
+    graph3d.graphData(build3dData())
+  } catch (error) {
+    threeError.value = `3D 图谱初始化失败：${error.message || '浏览器可能不支持 WebGL'}`
+  }
+}
+
+function setViewMode(mode) {
+  if (viewMode.value === mode) return
+  viewMode.value = mode
+  nextTick(() => {
+    if (mode === '3d') {
+      renderGraph3d()
+    } else if (graph && containerRef.value) {
+      graph.changeSize(containerRef.value.clientWidth || 800, 520)
+      graph.fitView(60)
+    } else {
+      renderGraph()
+    }
+  })
+}
+
 function highlightNeighbors(nodeId) {
   const node = graph.findById(nodeId)
   if (!node) return
@@ -323,6 +513,9 @@ function onResize() {
     graph.changeSize(containerRef.value.clientWidth || 800, 520)
     graph.fitView(60)
   }
+  if (graph3d && threeContainerRef.value && viewMode.value === '3d') {
+    graph3d.width(threeContainerRef.value.clientWidth || 800).height(520)
+  }
 }
 
 onMounted(() => {
@@ -330,13 +523,20 @@ onMounted(() => {
   window.addEventListener('resize', onResize)
 })
 
-watch(() => [props.nodes, props.edges], () => renderGraph(), { deep: true })
+watch(() => [props.nodes, props.edges], () => {
+  if (viewMode.value === '3d') renderGraph3d()
+  else renderGraph()
+}, { deep: true })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   if (graph) {
     graph.destroy()
     graph = null
+  }
+  if (graph3d) {
+    graph3d._destructor()
+    graph3d = null
   }
 })
 </script>
@@ -349,9 +549,48 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: #0f1226;
 }
+.graph-toolbar {
+  min-height: 48px;
+  padding: 8px 12px 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #292d43;
+  color: #e8e8ee;
+}
+.graph-toolbar strong { font-size: 14px; }
+.view-hint { margin-left: 12px; color: #9298b1; font-size: 12px; }
+.view-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid #353a54;
+  border-radius: 6px;
+  background: #171a2d;
+}
+.view-switch button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #aeb4cc;
+  font-size: 12px;
+  cursor: pointer;
+}
+.view-switch button.active { background: #409eff; color: #fff; }
 .graph {
   width: 100%;
   height: 520px;
+}
+.graph-3d { position: relative; }
+.graph-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #f89898;
+  background: rgba(15, 18, 38, 0.92);
+  font-size: 14px;
 }
 .empty {
   padding: 40px;
