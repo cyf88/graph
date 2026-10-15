@@ -131,15 +131,26 @@ function computeTreeLayout(nodes, edges) {
   }
   allUnits.forEach(u => { if (!unitLevel.has(u)) unitLevel.set(u, 0) })
 
-  // 自底向上分配横向位置（叶子依次排开，父单元居中到子女上方）
+  // 家庭单元成员（配偶合并后，一个单元可能占 1~2 个横向槽位）
+  const unitMembers = new Map()
+  ids.forEach(id => {
+    const u = find(id)
+    if (!unitMembers.has(u)) unitMembers.set(u, [])
+    unitMembers.get(u).push(id)
+  })
+
+  // 自底向上分配横向位置（叶子按成员数占用槽位，父单元居中到子女上方；
+  // 配偶独占一个槽位，避免挤进相邻单元造成节点覆盖）
   const unitX = new Map()
-  let leafCounter = 0
+  let nextLeaf = 0
   function assignX(u) {
     if (unitX.has(u)) return unitX.get(u)
     const kids = (unitChildren.get(u) || []).filter(k => k !== u)
     let cx
     if (kids.length === 0) {
-      cx = leafCounter++
+      const w = unitMembers.get(u).length
+      cx = nextLeaf + (w - 1) / 2
+      nextLeaf += w
     } else {
       const xs = kids.map(k => assignX(k))
       cx = (Math.min(...xs) + Math.max(...xs)) / 2
@@ -148,18 +159,17 @@ function computeTreeLayout(nodes, edges) {
     return cx
   }
   unitRoots.forEach(r => assignX(r))
-  allUnits.forEach(u => { if (!unitX.has(u)) unitX.set(u, leafCounter++) })
+  allUnits.forEach(u => {
+    if (!unitX.has(u)) {
+      const w = unitMembers.get(u).length
+      unitX.set(u, nextLeaf + (w - 1) / 2)
+      nextLeaf += w
+    }
+  })
 
   // 节点坐标
-  const colGap = 200
+  const colGap = 240
   const rowGap = 140
-  const memberGap = 180
-  const unitMembers = new Map()
-  ids.forEach(id => {
-    const u = find(id)
-    if (!unitMembers.has(u)) unitMembers.set(u, [])
-    unitMembers.get(u).push(id)
-  })
 
   const pos = new Map()
   for (const [u, members] of unitMembers) {
@@ -175,7 +185,23 @@ function computeTreeLayout(nodes, edges) {
         || members[0]
       const spouse = members.find(m => m !== anchor)
       pos.set(anchor, { x: cx, y })
-      pos.set(spouse, { x: cx + memberGap, y })
+      pos.set(spouse, { x: cx + colGap, y })
+    }
+  }
+  // 同一行防重叠兜底：间距小于最小值的节点从左到右依次排开
+  const minGapX = 110
+  const rows = new Map()
+  for (const p of pos.values()) {
+    const row = Math.round(p.y / rowGap)
+    if (!rows.has(row)) rows.set(row, [])
+    rows.get(row).push(p)
+  }
+  for (const list of rows.values()) {
+    list.sort((a, b) => a.x - b.x)
+    for (let i = 1; i < list.length; i++) {
+      if (list[i].x - list[i - 1].x < minGapX) {
+        list[i].x = list[i - 1].x + minGapX
+      }
     }
   }
   // 水平居中：让整棵树关于 x=0 对称对齐
@@ -393,9 +419,10 @@ async function renderGraph3d() {
           context.fillText(node.name || '未知', canvas.width / 2, canvas.height / 2, 240)
           const texture = new THREE.CanvasTexture(canvas)
           texture.colorSpace = THREE.SRGBColorSpace
-          const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }))
+          const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, depthTest: false }))
           label.position.set(0, 11, 0)
           label.scale.set(42, 10.5, 1)
+          label.renderOrder = 999
           return label
         })
         .nodeThreeObjectExtend(true)

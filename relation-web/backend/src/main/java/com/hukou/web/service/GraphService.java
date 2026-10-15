@@ -29,14 +29,20 @@ public class GraphService {
         this.driver = driver;
     }
 
-    /** 需求一：查询一个人的一级亲属（配偶、父母、子女） */
+    /** 需求一：查询一个人的近亲属（配偶、父母、子女、兄弟姐妹） */
     public GraphResult getDirectRelatives(String gmsfhm) {
         String query = """
                 MATCH (p:Person {gmsfhm: $gmsfhm})
                 OPTIONAL MATCH (p)-[:MARRIED_TO]-(sp:Person)
                 OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(par:Person)
                 OPTIONAL MATCH (p)-[:FATHER_OF|MOTHER_OF]->(child:Person)
-                WITH p, collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child) + [p] AS allNodes
+                OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(:Person)-[:FATHER_OF|MOTHER_OF]->(sib:Person)
+                WHERE sib <> p
+                OPTIONAL MATCH (sib)-[:MARRIED_TO]-(sibSpouse:Person)
+                OPTIONAL MATCH (sib)-[:FATHER_OF|MOTHER_OF]->(sibChild:Person)
+                WITH p,
+                  collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child)
+                    + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild) + [p] AS allNodes
                 UNWIND allNodes AS n
                 WITH p, collect(DISTINCT n) AS nodes
                 UNWIND nodes AS n
@@ -62,7 +68,7 @@ public class GraphService {
                     .findFirst()
                     .orElse(gmsfhm);
             return new GraphResult(true, nodes, edges,
-                    centerName + " 的一级亲属（配偶、父母、子女）");
+                    centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女）");
         }
     }
 

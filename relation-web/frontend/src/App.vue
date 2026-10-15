@@ -20,6 +20,22 @@
       </div>
       <div v-if="directResult" class="result">
         <div class="desc" :class="{ ok: directResult.hasRelation }">{{ directResult.description }}</div>
+        <div v-if="directResult.nodes?.length" class="relative-list-wrap">
+          <h3>关联人员列表</h3>
+          <div class="table-scroll">
+            <table class="relative-list">
+              <thead><tr><th>与查询人关系</th><th>姓名</th><th>身份证号</th><th>性别</th></tr></thead>
+              <tbody>
+                <tr v-for="person in listedRelatives" :key="person.id">
+                  <td><span class="relation-tag" :class="{ center: person.center }">{{ relationToCenter(person) }}</span></td>
+                  <td>{{ person.name || '未知' }}</td>
+                  <td>{{ person.gmsfhm || '-' }}</td>
+                  <td>{{ person.xbdm === '1' ? '男' : person.xbdm === '2' ? '女' : '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <GraphView :nodes="directResult.nodes" :edges="directResult.edges" />
       </div>
     </section>
@@ -59,7 +75,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import GraphView from './components/GraphView.vue'
 import { getDirectRelatives, getRelationPath } from './api'
 
@@ -69,6 +85,74 @@ const idB = ref('')
 const directResult = ref(null)
 const relationResult = ref(null)
 const loading = reactive({ direct: false, relation: false })
+const listedRelatives = computed(() => directResult.value?.nodes || [])
+
+function relationToCenter(person) {
+  if (person.center) return '查询人'
+  const center = directResult.value?.nodes?.find(node => node.center)
+  if (!center) return '-'
+  const edges = directResult.value.edges || []
+  const edge = edges.find(item => item.type === 'MARRIED_TO'
+    ? (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id)
+    : (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id))
+  if (edge?.type === 'MARRIED_TO') return '配偶'
+  if (edge && edge.target === center.id) return edge.type === 'MOTHER_OF' ? '母亲' : '父亲'
+  if (edge && edge.source === center.id) return person.xbdm === '2' ? '女儿' : '儿子'
+
+  // 共同父母节点表示兄弟姐妹关系，也用于识别兄弟姐妹的配偶和子女。
+  const centerParents = new Set(edges.filter(item => item.target === center.id && item.type !== 'MARRIED_TO').map(item => item.source))
+  const siblingIds = new Set(edges
+    .filter(item => item.target !== center.id && centerParents.has(item.source) && item.type !== 'MARRIED_TO')
+    .map(item => item.target))
+  const siblingParentEdge = edges.find(item => item.target === person.id && centerParents.has(item.source) && item.type !== 'MARRIED_TO')
+  if (siblingParentEdge) {
+    const siblingBirthDate = birthDateFromId(person.gmsfhm)
+    const centerBirthDate = birthDateFromId(center.gmsfhm)
+    if (siblingBirthDate && centerBirthDate && siblingBirthDate !== centerBirthDate) {
+      const isOlder = siblingBirthDate < centerBirthDate
+      if (person.xbdm === '2') return isOlder ? '姐姐' : '妹妹'
+      return isOlder ? '哥哥' : '弟弟'
+    }
+    return person.xbdm === '2' ? '姐妹' : '兄弟'
+  }
+
+  const siblingChildEdge = edges.find(item => item.target === person.id && siblingIds.has(item.source) && item.type !== 'MARRIED_TO')
+  if (siblingChildEdge) {
+    const sibling = directResult.value.nodes.find(node => node.id === siblingChildEdge.source)
+    const isNiece = person.xbdm === '2'
+    if (sibling?.xbdm === '2') return isNiece ? '外甥女' : '外甥'
+    return isNiece ? '侄女' : '侄子'
+  }
+
+  const siblingSpouseEdge = edges.find(item => item.type === 'MARRIED_TO'
+    && ((item.source === person.id && siblingIds.has(item.target))
+      || (item.target === person.id && siblingIds.has(item.source))))
+  if (siblingSpouseEdge) {
+    const siblingId = siblingSpouseEdge.source === person.id ? siblingSpouseEdge.target : siblingSpouseEdge.source
+    const sibling = directResult.value.nodes.find(node => node.id === siblingId)
+    const siblingBirthDate = birthDateFromId(sibling?.gmsfhm)
+    const centerBirthDate = birthDateFromId(center.gmsfhm)
+    if (siblingBirthDate && centerBirthDate && siblingBirthDate !== centerBirthDate) {
+      const isOlder = siblingBirthDate < centerBirthDate
+      if (sibling?.xbdm === '2') return isOlder ? '姐夫' : '妹夫'
+      return isOlder ? '嫂子' : '弟媳'
+    }
+    return sibling?.xbdm === '2' ? '姐妹的配偶' : '兄弟的配偶'
+  }
+  return '亲属'
+}
+
+function birthDateFromId(gmsfhm) {
+  const match = String(gmsfhm || '').match(/^\d{6}(\d{8})\d{4}$/)
+  if (!match) return null
+  const date = match[1]
+  const year = Number(date.slice(0, 4))
+  const month = Number(date.slice(4, 6))
+  const day = Number(date.slice(6, 8))
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) return null
+  return date
+}
 
 async function queryDirect() {
   const val = singleId.value.trim()
@@ -153,4 +237,12 @@ body { margin: 0; background: #f5f7fa; color: #303133; font-family: "Microsoft Y
 .hint { color: #909399; font-size: 13px; }
 .hint h3 { margin: 0 0 8px; color: #606266; }
 .hint p { margin: 4px 0; }
+.relative-list-wrap { margin: 16px 0; }
+.relative-list-wrap h3 { margin: 0 0 10px; font-size: 15px; }
+.table-scroll { overflow-x: auto; }
+.relative-list { width: 100%; border-collapse: collapse; font-size: 14px; }
+.relative-list th, .relative-list td { padding: 10px 12px; border-bottom: 1px solid #ebeef5; text-align: left; white-space: nowrap; }
+.relative-list th { color: #606266; background: #f5f7fa; font-weight: 600; }
+.relation-tag { display: inline-block; padding: 3px 9px; border-radius: 12px; color: #337ecc; background: #ecf5ff; }
+.relation-tag.center { color: #606266; background: #f2f3f5; }
 </style>
