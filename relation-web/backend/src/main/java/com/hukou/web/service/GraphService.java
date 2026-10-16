@@ -43,8 +43,8 @@ public class GraphService {
             WHERE m IN nodes
             WITH p, nodes, collect(DISTINCT r) AS rels
             RETURN
-              [n IN nodes | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
-              [r IN rels | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
+              [n IN nodes | {id: n.gmsfhm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
+              [r IN rels | {source: startNode(r).gmsfhm, target: endNode(r).gmsfhm, type: type(r)}] AS edges
             """;
 
     private final Driver driver;
@@ -93,8 +93,8 @@ public class GraphService {
                 WHERE m IN nodes
                 WITH p, nodes, collect(DISTINCT r) AS rels
                 RETURN
-                  [n IN nodes | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
-                  [r IN rels | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
+                  [n IN nodes | {id: n.gmsfhm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
+                  [r IN rels | {source: startNode(r).gmsfhm, target: endNode(r).gmsfhm, type: type(r)}] AS edges
                 """.formatted(depth);
     }
 
@@ -114,8 +114,8 @@ public class GraphService {
                 MATCH path = shortestPath((a)-[*..%d]-(b))
                 WITH a, b, nodes(path) AS ns, relationships(path) AS rs
                 RETURN
-                  [n IN ns | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, endpoint: n = a OR n = b}] AS nodes,
-                  [r IN rs | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
+                  [n IN ns | {id: n.gmsfhm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, endpoint: n = a OR n = b}] AS nodes,
+                  [r IN rs | {source: startNode(r).gmsfhm, target: endNode(r).gmsfhm, type: type(r)}] AS edges
                 """.formatted(maxDepth);
 
         try (Session session = driver.session()) {
@@ -134,7 +134,7 @@ public class GraphService {
     private GraphResult getSinglePerson(String gmsfhm) {
         String query = """
                 MATCH (n:Person {gmsfhm: $gmsfhm})
-                RETURN n.rkbm AS id, n.xm AS name, n.gmsfhm AS gmsfhm, n.xbdm AS xbdm
+                RETURN n.gmsfhm AS id, n.xm AS name, n.gmsfhm AS gmsfhm, n.xbdm AS xbdm
                 """;
         try (Session session = driver.session()) {
             Result result = session.run(query, Map.of("gmsfhm", gmsfhm));

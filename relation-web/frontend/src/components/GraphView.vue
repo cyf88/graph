@@ -96,6 +96,23 @@ function computeTreeLayout(nodes, edges) {
     }
   }
 
+  // 配偶同辈 → 配偶双方的父辈也应同辈（亲家同辈）。
+  // 否则跨家族路径里，一方的祖先会被错误地当作另一家族的根，导致辈分错位。
+  const parentOfChild = new Map()
+  for (const [p, c] of childEdges) {
+    if (!parentOfChild.has(c)) parentOfChild.set(c, [])
+    parentOfChild.get(c).push(p)
+  }
+  for (const e of edges) {
+    if (e.type !== 'MARRIED_TO') continue
+    const pa = parentOfChild.get(e.source) || []
+    const pb = parentOfChild.get(e.target) || []
+    const allParents = [...pa, ...pb]
+    for (let i = 1; i < allParents.length; i++) {
+      union(allParents[0], allParents[i])
+    }
+  }
+
   // 有子女的成员（向下血缘）
   const parentIds = new Set(childEdges.map(([p]) => p))
 
@@ -113,23 +130,28 @@ function computeTreeLayout(nodes, edges) {
     unitParents.get(cc).add(pc)
   }
 
-  // 代际（BFS）
+  // 代际：每个家庭单元位于其“最深父辈”的下一层，
+  // 避免同一单元存在多个父辈（跨家族婚姻）时被较浅父辈压低层级
   const allUnits = new Set(ids.map(id => find(id)))
-  const unitLevel = new Map()
   const unitRoots = [...allUnits].filter(u => !unitParents.has(u))
-  const queue = [...unitRoots]
-  unitRoots.forEach(r => unitLevel.set(r, 0))
-  while (queue.length) {
-    const u = queue.shift()
-    const lv = unitLevel.get(u)
-    for (const c of (unitChildren.get(u) || [])) {
-      if (!unitLevel.has(c)) {
-        unitLevel.set(c, lv + 1)
-        queue.push(c)
+  const unitLevel = new Map()
+  const visiting = new Set()
+  function computeLevel(u) {
+    if (unitLevel.has(u)) return unitLevel.get(u)
+    if (visiting.has(u)) return 0 // 防环兜底
+    visiting.add(u)
+    const parents = unitParents.get(u)
+    let lv = 0
+    if (parents && parents.size > 0) {
+      for (const p of parents) {
+        lv = Math.max(lv, computeLevel(p) + 1)
       }
     }
+    visiting.delete(u)
+    unitLevel.set(u, lv)
+    return lv
   }
-  allUnits.forEach(u => { if (!unitLevel.has(u)) unitLevel.set(u, 0) })
+  allUnits.forEach(u => computeLevel(u))
 
   // 家庭单元成员（配偶合并后，一个单元可能占 1~2 个横向槽位）
   const unitMembers = new Map()

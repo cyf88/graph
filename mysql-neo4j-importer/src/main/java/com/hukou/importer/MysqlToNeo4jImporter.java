@@ -26,7 +26,7 @@ import java.util.Map;
  *   3. 每批一个事务提交，内存占用与事务大小可控。
  *
  * 图模型：
- *   节点  (:Person)    —— 每个人一个节点，唯一键 rkbm（人口编码）
+ *   节点  (:Person)    —— 每个人一个节点，唯一键 gmsfhm（公民身份号码）
  *   关系  [:FATHER_OF] —— 父亲 -> 子女
  *         [:MOTHER_OF] —— 母亲 -> 子女
  *         [:MARRIED_TO]—— 配偶（无向，仅创建一次）
@@ -38,7 +38,7 @@ public class MysqlToNeo4jImporter {
     /** 每处理多少行打印一次进度 */
     private static final long LOG_EVERY = 500000;
 
-    /** 节点属性字段（不含 rkbm，rkbm 作为唯一键） */
+    /** 节点属性字段（不含 gmsfhm，gmsfhm 作为唯一键） */
     private static final String[] PROPS = {"gmsfhm", "xm", "xbdm", "csrq", "mzdm", "hh", "hlxdm", "yhzgxdm"};
 
     public static void main(String[] args) throws Exception {
@@ -50,8 +50,8 @@ public class MysqlToNeo4jImporter {
     }
 
     private static void importData(Config config) throws Exception {
-        String sql = "SELECT rkbm, gmsfhm, xm, xbdm, csrq, mzdm, hh, hlxdm, yhzgxdm, "
-                + "fq_rkbm, mq_rkbm, po_rkbm FROM " + config.table;
+        String sql = "SELECT gmsfhm, xm, xbdm, csrq, mzdm, hh, hlxdm, yhzgxdm, "
+                + "fq_gmsfhm, mq_gmsfhm, po_gmsfhm FROM " + config.table;
 
         try (Driver driver = GraphDatabase.driver(config.neo4jUri, AuthTokens.basic(config.neo4jUser, config.neo4jPassword));
              Session session = driver.session();
@@ -60,11 +60,9 @@ public class MysqlToNeo4jImporter {
 
             System.out.printf("源表：%s，批大小：%d，Neo4j：%s%n", config.table, BATCH_SIZE, config.neo4jUri);
 
-            session.run("CREATE CONSTRAINT person_rkbm_unique IF NOT EXISTS "
-                    + "FOR (p:Person) REQUIRE p.rkbm IS UNIQUE");
-            session.run("CREATE INDEX person_gmsfhm_index IF NOT EXISTS "
-                    + "FOR (p:Person) ON (p.gmsfhm)");
-            System.out.println("Neo4j 唯一性约束与 gmsfhm 索引已就绪");
+            session.run("CREATE CONSTRAINT person_gmsfhm_unique IF NOT EXISTS "
+                    + "FOR (p:Person) REQUIRE p.gmsfhm IS UNIQUE");
+            System.out.println("Neo4j gmsfhm 唯一性约束已就绪");
 
             // 大批量读取时调大源库查询超时（StarRocks 默认 300 秒，易超时）
             if (config.queryTimeoutSeconds > 0) {
@@ -114,13 +112,12 @@ public class MysqlToNeo4jImporter {
 
     private static Map<String, Object> readRow(ResultSet rs) throws SQLException {
         Map<String, Object> p = new LinkedHashMap<>();
-        p.put("rkbm", rs.getString("rkbm"));
         for (String k : PROPS) {
             p.put(k, rs.getString(k));
         }
-        p.put("fq_rkbm", rs.getString("fq_rkbm"));
-        p.put("mq_rkbm", rs.getString("mq_rkbm"));
-        p.put("po_rkbm", rs.getString("po_rkbm"));
+        p.put("fq_gmsfhm", rs.getString("fq_gmsfhm"));
+        p.put("mq_gmsfhm", rs.getString("mq_gmsfhm"));
+        p.put("po_gmsfhm", rs.getString("po_gmsfhm"));
         return p;
     }
 
@@ -132,15 +129,19 @@ public class MysqlToNeo4jImporter {
 
     private static Stats writeBatch(Session session, List<Map<String, Object>> batch) {
         return session.executeWrite(tx -> {
-            // 1. 批量合并 Person 节点
+            // 1. 批量合并 Person 节点（仅保留 gmsfhm 非空的行）
             List<Map<String, Object>> nodeRows = new ArrayList<>(batch.size());
             for (Map<String, Object> p : batch) {
+                String gmsfhm = (String) p.get("gmsfhm");
+                if (!isNotBlank(gmsfhm)) {
+                    continue;
+                }
                 Map<String, Object> row = new HashMap<>();
-                row.put("rkbm", p.get("rkbm"));
+                row.put("gmsfhm", gmsfhm);
                 row.put("props", buildNodeProps(p));
                 nodeRows.add(row);
             }
-            tx.run("UNWIND $rows AS row MERGE (n:Person {rkbm: row.rkbm}) SET n += row.props",
+            tx.run("UNWIND $rows AS row MERGE (n:Person {gmsfhm: row.gmsfhm}) SET n += row.props",
                     Map.of("rows", nodeRows)).consume();
 
             // 2. 收集本批关系
@@ -148,39 +149,42 @@ public class MysqlToNeo4jImporter {
             List<Map<String, Object>> motherRows = new ArrayList<>();
             List<Map<String, Object>> spouseRows = new ArrayList<>();
             for (Map<String, Object> p : batch) {
-                String rkbm = (String) p.get("rkbm");
-                String fq = (String) p.get("fq_rkbm");
-                String mq = (String) p.get("mq_rkbm");
-                String po = (String) p.get("po_rkbm");
+                String gmsfhm = (String) p.get("gmsfhm");
+                if (!isNotBlank(gmsfhm)) {
+                    continue;
+                }
+                String fq = (String) p.get("fq_gmsfhm");
+                String mq = (String) p.get("mq_gmsfhm");
+                String po = (String) p.get("po_gmsfhm");
                 if (isNotBlank(fq)) {
-                    fatherRows.add(map("child", rkbm, "parent", fq));
+                    fatherRows.add(map("child", gmsfhm, "parent", fq));
                 }
                 if (isNotBlank(mq)) {
-                    motherRows.add(map("child", rkbm, "parent", mq));
+                    motherRows.add(map("child", gmsfhm, "parent", mq));
                 }
-                // 配偶关系只按字典序创建一次，避免双向重复
-                if (isNotBlank(po) && rkbm.compareTo(po) < 0) {
-                    spouseRows.add(map("a", rkbm, "b", po));
+                // 配偶关系无向，按 gmsfhm 字典序去重，避免双向重复
+                if (isNotBlank(po) && gmsfhm.compareTo(po) < 0) {
+                    spouseRows.add(map("a", gmsfhm, "b", po));
                 }
             }
 
             // 3. 批量合并关系（端点用 MERGE 兜底，避免父/母/配偶节点在后续批次才出现时丢边）
             if (!fatherRows.isEmpty()) {
                 tx.run("UNWIND $rows AS row "
-                        + "MERGE (a:Person {rkbm: row.child}) "
-                        + "MERGE (b:Person {rkbm: row.parent}) "
+                        + "MERGE (a:Person {gmsfhm: row.child}) "
+                        + "MERGE (b:Person {gmsfhm: row.parent}) "
                         + "MERGE (b)-[:FATHER_OF]->(a)", Map.of("rows", fatherRows)).consume();
             }
             if (!motherRows.isEmpty()) {
                 tx.run("UNWIND $rows AS row "
-                        + "MERGE (a:Person {rkbm: row.child}) "
-                        + "MERGE (b:Person {rkbm: row.parent}) "
+                        + "MERGE (a:Person {gmsfhm: row.child}) "
+                        + "MERGE (b:Person {gmsfhm: row.parent}) "
                         + "MERGE (b)-[:MOTHER_OF]->(a)", Map.of("rows", motherRows)).consume();
             }
             if (!spouseRows.isEmpty()) {
                 tx.run("UNWIND $rows AS row "
-                        + "MERGE (a:Person {rkbm: row.a}) "
-                        + "MERGE (b:Person {rkbm: row.b}) "
+                        + "MERGE (a:Person {gmsfhm: row.a}) "
+                        + "MERGE (b:Person {gmsfhm: row.b}) "
                         + "MERGE (a)-[:MARRIED_TO]->(b)", Map.of("rows", spouseRows)).consume();
             }
 
@@ -188,7 +192,7 @@ public class MysqlToNeo4jImporter {
         });
     }
 
-    /** 抽取节点属性（不含 rkbm，只保留非空字段） */
+    /** 抽取节点属性（不含 gmsfhm，只保留非空字段） */
     private static Map<String, Object> buildNodeProps(Map<String, Object> p) {
         Map<String, Object> props = new LinkedHashMap<>();
         for (String k : PROPS) {
