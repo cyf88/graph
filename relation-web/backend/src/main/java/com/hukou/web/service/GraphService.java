@@ -23,36 +23,42 @@ public class GraphService {
             "MOTHER_OF", "母亲",
             "MARRIED_TO", "配偶");
 
+    /** 默认模式：查询配偶、父母、子女、兄弟姐妹及其配偶、子女 */
+    private static final String DEFAULT_DIRECT_QUERY = """
+            MATCH (p:Person {gmsfhm: $gmsfhm})
+            OPTIONAL MATCH (p)-[:MARRIED_TO]-(sp:Person)
+            OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(par:Person)
+            OPTIONAL MATCH (p)-[:FATHER_OF|MOTHER_OF]->(child:Person)
+            OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(:Person)-[:FATHER_OF|MOTHER_OF]->(sib:Person)
+            WHERE sib <> p
+            OPTIONAL MATCH (sib)-[:MARRIED_TO]-(sibSpouse:Person)
+            OPTIONAL MATCH (sib)-[:FATHER_OF|MOTHER_OF]->(sibChild:Person)
+            WITH p,
+              collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child)
+                + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild) + [p] AS allNodes
+            UNWIND allNodes AS n
+            WITH p, collect(DISTINCT n) AS nodes
+            UNWIND nodes AS n
+            OPTIONAL MATCH (n)-[r:FATHER_OF|MOTHER_OF|MARRIED_TO]-(m)
+            WHERE m IN nodes
+            WITH p, nodes, collect(DISTINCT r) AS rels
+            RETURN
+              [n IN nodes | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
+              [r IN rels | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
+            """;
+
     private final Driver driver;
 
     public GraphService(Driver driver) {
         this.driver = driver;
     }
 
-    /** 需求一：查询一个人的近亲属（配偶、父母、子女、兄弟姐妹） */
-    public GraphResult getDirectRelatives(String gmsfhm) {
-        String query = """
-                MATCH (p:Person {gmsfhm: $gmsfhm})
-                OPTIONAL MATCH (p)-[:MARRIED_TO]-(sp:Person)
-                OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(par:Person)
-                OPTIONAL MATCH (p)-[:FATHER_OF|MOTHER_OF]->(child:Person)
-                OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(:Person)-[:FATHER_OF|MOTHER_OF]->(sib:Person)
-                WHERE sib <> p
-                OPTIONAL MATCH (sib)-[:MARRIED_TO]-(sibSpouse:Person)
-                OPTIONAL MATCH (sib)-[:FATHER_OF|MOTHER_OF]->(sibChild:Person)
-                WITH p,
-                  collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child)
-                    + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild) + [p] AS allNodes
-                UNWIND allNodes AS n
-                WITH p, collect(DISTINCT n) AS nodes
-                UNWIND nodes AS n
-                OPTIONAL MATCH (n)-[r:FATHER_OF|MOTHER_OF|MARRIED_TO]-(m)
-                WHERE m IN nodes
-                WITH p, nodes, collect(DISTINCT r) AS rels
-                RETURN
-                  [n IN nodes | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
-                  [r IN rels | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
-                """;
+    /** 需求一：查询一个人的近亲属。
+     *  level=0：默认模式（配偶、父母、子女、兄弟姐妹及其配偶、子女）
+     *  level=1..8：按级数扩展（1 级=直接关联节点，最多 8 级）
+     */
+    public GraphResult getDirectRelatives(String gmsfhm, int level) {
+        String query = level <= 0 ? DEFAULT_DIRECT_QUERY : buildLevelQuery(level);
 
         try (Session session = driver.session()) {
             Result result = session.run(query, Map.of("gmsfhm", gmsfhm));
@@ -67,26 +73,50 @@ public class GraphService {
                     .map(GraphNode::name)
                     .findFirst()
                     .orElse(gmsfhm);
-            return new GraphResult(true, nodes, edges,
-                    centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女）");
+            String desc = level <= 0
+                    ? centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女）"
+                    : centerName + " 的 " + Math.min(Math.max(level, 1), 8) + " 级关系";
+            return new GraphResult(true, nodes, edges, desc);
         }
     }
 
-    /** 需求二：查询任意两人的关系路径 */
-    public GraphResult getRelationPath(String from, String to) {
+    private String buildLevelQuery(int level) {
+        int depth = Math.min(Math.max(level, 1), 8);
+        return """
+                MATCH (p:Person {gmsfhm: $gmsfhm})
+                OPTIONAL MATCH (p)-[*1..%d]-(n:Person)
+                WITH p, collect(DISTINCT n) + [p] AS allNodes
+                UNWIND allNodes AS n
+                WITH p, collect(DISTINCT n) AS nodes
+                UNWIND nodes AS n
+                OPTIONAL MATCH (n)-[r:FATHER_OF|MOTHER_OF|MARRIED_TO]-(m)
+                WHERE m IN nodes
+                WITH p, nodes, collect(DISTINCT r) AS rels
+                RETURN
+                  [n IN nodes | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
+                  [r IN rels | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
+                """.formatted(depth);
+    }
+
+    /** 需求二：查询任意两人的关系路径。
+     *  level=0：默认（最短路径，最多 8 级）
+     *  level=1..8：限制最短路径的最大级数
+     */
+    public GraphResult getRelationPath(String from, String to, int level) {
         // 同一个人
         if (from.equals(to)) {
             return getSinglePerson(from);
         }
 
+        int maxDepth = level <= 0 ? 8 : Math.min(Math.max(level, 1), 8);
         String query = """
                 MATCH (a:Person {gmsfhm: $from}), (b:Person {gmsfhm: $to})
-                MATCH path = shortestPath((a)-[*..8]-(b))
+                MATCH path = shortestPath((a)-[*..%d]-(b))
                 WITH a, b, nodes(path) AS ns, relationships(path) AS rs
                 RETURN
                   [n IN ns | {id: n.rkbm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, endpoint: n = a OR n = b}] AS nodes,
                   [r IN rs | {source: startNode(r).rkbm, target: endNode(r).rkbm, type: type(r)}] AS edges
-                """;
+                """.formatted(maxDepth);
 
         try (Session session = driver.session()) {
             Result result = session.run(query, Map.of("from", from, "to", to));

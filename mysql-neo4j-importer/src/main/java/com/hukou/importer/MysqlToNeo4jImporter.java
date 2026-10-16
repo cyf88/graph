@@ -3,13 +3,13 @@ package com.hukou.importer;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
-import org.neo4j.driver.Record;
 import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,7 +18,12 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 将 MySQL hukou 库中的户籍基本信息表导入 Neo4j 图数据库。
+ * 将 MySQL（或兼容 MySQL 协议的 StarRocks）中的户籍基本信息表导入 Neo4j。
+ *
+ * 为支持千万级数据：
+ *   1. 源库采用 JDBC 流式读取（setFetchSize），不一次性加载全部记录；
+ *   2. 按批写入 Neo4j，节点与关系均用 UNWIND 批量合并，减少网络往返；
+ *   3. 每批一个事务提交，内存占用与事务大小可控。
  *
  * 图模型：
  *   节点  (:Person)    —— 每个人一个节点，唯一键 rkbm（人口编码）
@@ -28,111 +33,165 @@ import java.util.Map;
  */
 public class MysqlToNeo4jImporter {
 
-    // ===== MySQL 配置 =====
-    private static final String MYSQL_URL = "jdbc:mysql://172.17.43.25:3308/hukou"
-            + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=utf8";
-    private static final String MYSQL_USER = "root";
-    private static final String MYSQL_PASSWORD = "root";
-    private static final String TABLE = "zl_rk_xzrk_pb_hj_jbxx";
+    /** 每批处理的行数 */
+    private static final int BATCH_SIZE = 10000;
+    /** 每处理多少行打印一次进度 */
+    private static final long LOG_EVERY = 500000;
 
-    // ===== Neo4j 配置 =====
-    private static final String NEO4J_URI = "bolt://172.17.43.137:7687";
-    private static final String NEO4J_USER = "neo4j";
-    private static final String NEO4J_PASSWORD = "neo4j123";
+    /** 节点属性字段（不含 rkbm，rkbm 作为唯一键） */
+    private static final String[] PROPS = {"gmsfhm", "xm", "xbdm", "csrq", "mzdm", "hh", "hlxdm", "yhzgxdm"};
 
     public static void main(String[] args) throws Exception {
-        List<Map<String, Object>> persons = loadPersons();
-        System.out.println("从 MySQL 读取到 " + persons.size() + " 条人口记录");
-
-        importToNeo4j(persons);
-        System.out.println("导入 Neo4j 完成");
+        Config config = Config.load(args);
+        long start = System.currentTimeMillis();
+        importData(config);
+        long costMs = System.currentTimeMillis() - start;
+        System.out.printf("全部完成，总耗时 %.1f 分钟%n", costMs / 60000.0);
     }
 
-    /** 从 MySQL 读取人口记录（含用于建边的父亲/母亲/配偶人口编码） */
-    private static List<Map<String, Object>> loadPersons() throws Exception {
+    private static void importData(Config config) throws Exception {
         String sql = "SELECT rkbm, gmsfhm, xm, xbdm, csrq, mzdm, hh, hlxdm, yhzgxdm, "
-                + "fq_rkbm, mq_rkbm, po_rkbm FROM " + TABLE;
+                + "fq_rkbm, mq_rkbm, po_rkbm FROM " + config.table;
 
-        List<Map<String, Object>> list = new ArrayList<>();
-        try (Connection conn = DriverManager.getConnection(MYSQL_URL, MYSQL_USER, MYSQL_PASSWORD);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                Map<String, Object> p = new LinkedHashMap<>();
-                p.put("rkbm", rs.getString("rkbm"));
-                p.put("gmsfhm", rs.getString("gmsfhm"));
-                p.put("xm", rs.getString("xm"));
-                p.put("xbdm", rs.getString("xbdm"));
-                p.put("csrq", rs.getString("csrq"));
-                p.put("mzdm", rs.getString("mzdm"));
-                p.put("hh", rs.getString("hh"));
-                p.put("hlxdm", rs.getString("hlxdm"));
-                p.put("yhzgxdm", rs.getString("yhzgxdm"));
-                p.put("fq_rkbm", rs.getString("fq_rkbm"));
-                p.put("mq_rkbm", rs.getString("mq_rkbm"));
-                p.put("po_rkbm", rs.getString("po_rkbm"));
-                list.add(p);
-            }
-        }
-        return list;
-    }
+        try (Driver driver = GraphDatabase.driver(config.neo4jUri, AuthTokens.basic(config.neo4jUser, config.neo4jPassword));
+             Session session = driver.session();
+             Connection conn = DriverManager.getConnection(config.mysqlUrl, config.mysqlUser, config.mysqlPassword);
+             Statement stmt = conn.createStatement()) {
 
-    /** 写入 Neo4j：节点 + 关系 */
-    private static void importToNeo4j(List<Map<String, Object>> persons) {
-        try (Driver driver = GraphDatabase.driver(NEO4J_URI, AuthTokens.basic(NEO4J_USER, NEO4J_PASSWORD));
-             Session session = driver.session()) {
+            System.out.printf("源表：%s，批大小：%d，Neo4j：%s%n", config.table, BATCH_SIZE, config.neo4jUri);
 
-            // 唯一性约束：保证 rkbm 唯一，加速 MERGE
             session.run("CREATE CONSTRAINT person_rkbm_unique IF NOT EXISTS "
                     + "FOR (p:Person) REQUIRE p.rkbm IS UNIQUE");
+            session.run("CREATE INDEX person_gmsfhm_index IF NOT EXISTS "
+                    + "FOR (p:Person) ON (p.gmsfhm)");
+            System.out.println("Neo4j 唯一性约束与 gmsfhm 索引已就绪");
 
-            // 阶段 1：创建 Person 节点
-            for (Map<String, Object> p : persons) {
-                Map<String, Object> props = buildNodeProps(p);
-                Map<String, Object> params = new HashMap<>();
-                params.put("rkbm", p.get("rkbm"));
-                params.put("props", props);
-                session.run("MERGE (n:Person {rkbm: $rkbm}) SET n += $props", params);
-            }
-            System.out.println("Person 节点创建完成");
-
-            // 阶段 2：创建亲属关系
-            int father = 0, mother = 0, spouse = 0;
-            for (Map<String, Object> p : persons) {
-                String rkbm = (String) p.get("rkbm");
-                String fq = (String) p.get("fq_rkbm");
-                String mq = (String) p.get("mq_rkbm");
-                String po = (String) p.get("po_rkbm");
-
-                if (isNotBlank(fq)) {
-                    session.run("MATCH (a:Person {rkbm: $rkbm}), (b:Person {rkbm: $fq}) "
-                            + "MERGE (b)-[:FATHER_OF]->(a)", map("rkbm", rkbm, "fq", fq));
-                    father++;
-                }
-                if (isNotBlank(mq)) {
-                    session.run("MATCH (a:Person {rkbm: $rkbm}), (b:Person {rkbm: $mq}) "
-                            + "MERGE (b)-[:MOTHER_OF]->(a)", map("rkbm", rkbm, "mq", mq));
-                    mother++;
-                }
-                // 配偶关系只按字典序创建一次，避免双向重复
-                if (isNotBlank(po) && rkbm.compareTo(po) < 0) {
-                    session.run("MATCH (a:Person {rkbm: $rkbm}), (b:Person {rkbm: $po}) "
-                            + "MERGE (a)-[:MARRIED_TO]->(b)", map("rkbm", rkbm, "po", po));
-                    spouse++;
+            // 大批量读取时调大源库查询超时（StarRocks 默认 300 秒，易超时）
+            if (config.queryTimeoutSeconds > 0) {
+                try {
+                    stmt.execute("SET query_timeout = " + config.queryTimeoutSeconds);
+                    System.out.println("已设置源库查询超时：" + config.queryTimeoutSeconds + " 秒");
+                } catch (SQLException e) {
+                    System.out.println("设置源库查询超时失败（非 StarRocks 可忽略）：" + e.getMessage());
                 }
             }
-            System.out.printf("关系创建完成：FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n",
-                    father, mother, spouse);
 
+            // 流式读取，避免一次性加载全部数据到内存
+            stmt.setFetchSize(Integer.MIN_VALUE);
+            System.out.println("开始流式读取并分批写入...");
+
+            long total = 0;
+            long father = 0, mother = 0, spouse = 0;
+            List<Map<String, Object>> batch = new ArrayList<>(BATCH_SIZE);
+
+            try (ResultSet rs = stmt.executeQuery(sql)) {
+                while (rs.next()) {
+                    batch.add(readRow(rs));
+                    if (batch.size() >= BATCH_SIZE) {
+                        Stats s = writeBatch(session, batch);
+                        total += batch.size();
+                        father += s.father;
+                        mother += s.mother;
+                        spouse += s.spouse;
+                        batch.clear();
+                        logProgress(total);
+                    }
+                }
+                if (!batch.isEmpty()) {
+                    Stats s = writeBatch(session, batch);
+                    total += batch.size();
+                    father += s.father;
+                    mother += s.mother;
+                    spouse += s.spouse;
+                }
+            }
+
+            System.out.printf("读取并写入完成：共 %d 条记录%n", total);
+            System.out.printf("本次关系：FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n", father, mother, spouse);
             printSummary(session);
         }
     }
 
-    /** 抽取节点属性（不含 rkbm，rkbm 已由 MERGE 设置） */
+    private static Map<String, Object> readRow(ResultSet rs) throws SQLException {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("rkbm", rs.getString("rkbm"));
+        for (String k : PROPS) {
+            p.put(k, rs.getString(k));
+        }
+        p.put("fq_rkbm", rs.getString("fq_rkbm"));
+        p.put("mq_rkbm", rs.getString("mq_rkbm"));
+        p.put("po_rkbm", rs.getString("po_rkbm"));
+        return p;
+    }
+
+    private static void logProgress(long total) {
+        if (total > 0 && total % LOG_EVERY == 0) {
+            System.out.printf("已处理 %d 万条...%n", total / 10000);
+        }
+    }
+
+    private static Stats writeBatch(Session session, List<Map<String, Object>> batch) {
+        return session.executeWrite(tx -> {
+            // 1. 批量合并 Person 节点
+            List<Map<String, Object>> nodeRows = new ArrayList<>(batch.size());
+            for (Map<String, Object> p : batch) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("rkbm", p.get("rkbm"));
+                row.put("props", buildNodeProps(p));
+                nodeRows.add(row);
+            }
+            tx.run("UNWIND $rows AS row MERGE (n:Person {rkbm: row.rkbm}) SET n += row.props",
+                    Map.of("rows", nodeRows)).consume();
+
+            // 2. 收集本批关系
+            List<Map<String, Object>> fatherRows = new ArrayList<>();
+            List<Map<String, Object>> motherRows = new ArrayList<>();
+            List<Map<String, Object>> spouseRows = new ArrayList<>();
+            for (Map<String, Object> p : batch) {
+                String rkbm = (String) p.get("rkbm");
+                String fq = (String) p.get("fq_rkbm");
+                String mq = (String) p.get("mq_rkbm");
+                String po = (String) p.get("po_rkbm");
+                if (isNotBlank(fq)) {
+                    fatherRows.add(map("child", rkbm, "parent", fq));
+                }
+                if (isNotBlank(mq)) {
+                    motherRows.add(map("child", rkbm, "parent", mq));
+                }
+                // 配偶关系只按字典序创建一次，避免双向重复
+                if (isNotBlank(po) && rkbm.compareTo(po) < 0) {
+                    spouseRows.add(map("a", rkbm, "b", po));
+                }
+            }
+
+            // 3. 批量合并关系（端点用 MERGE 兜底，避免父/母/配偶节点在后续批次才出现时丢边）
+            if (!fatherRows.isEmpty()) {
+                tx.run("UNWIND $rows AS row "
+                        + "MERGE (a:Person {rkbm: row.child}) "
+                        + "MERGE (b:Person {rkbm: row.parent}) "
+                        + "MERGE (b)-[:FATHER_OF]->(a)", Map.of("rows", fatherRows)).consume();
+            }
+            if (!motherRows.isEmpty()) {
+                tx.run("UNWIND $rows AS row "
+                        + "MERGE (a:Person {rkbm: row.child}) "
+                        + "MERGE (b:Person {rkbm: row.parent}) "
+                        + "MERGE (b)-[:MOTHER_OF]->(a)", Map.of("rows", motherRows)).consume();
+            }
+            if (!spouseRows.isEmpty()) {
+                tx.run("UNWIND $rows AS row "
+                        + "MERGE (a:Person {rkbm: row.a}) "
+                        + "MERGE (b:Person {rkbm: row.b}) "
+                        + "MERGE (a)-[:MARRIED_TO]->(b)", Map.of("rows", spouseRows)).consume();
+            }
+
+            return new Stats(fatherRows.size(), motherRows.size(), spouseRows.size());
+        });
+    }
+
+    /** 抽取节点属性（不含 rkbm，只保留非空字段） */
     private static Map<String, Object> buildNodeProps(Map<String, Object> p) {
         Map<String, Object> props = new LinkedHashMap<>();
-        String[] keys = {"gmsfhm", "xm", "xbdm", "csrq", "mzdm", "hh", "hlxdm", "yhzgxdm"};
-        for (String k : keys) {
+        for (String k : PROPS) {
             Object v = p.get(k);
             if (v != null) {
                 props.put(k, v);
@@ -142,19 +201,20 @@ public class MysqlToNeo4jImporter {
     }
 
     private static void printSummary(Session session) {
-        Result r1 = session.run("MATCH (p:Person) RETURN count(p) AS c");
-        Record rec = r1.single();
-        long personCount = rec.get("c").asLong();
-
-        long fatherCount = count(session, "FATHER_OF");
-        long motherCount = count(session, "MOTHER_OF");
-        long spouseCount = count(session, "MARRIED_TO");
-
-        System.out.printf("== 导入结果 ==  Person=%d, FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n",
+        long personCount = countNodes(session);
+        long fatherCount = countRel(session, "FATHER_OF");
+        long motherCount = countRel(session, "MOTHER_OF");
+        long spouseCount = countRel(session, "MARRIED_TO");
+        System.out.printf("== 库内汇总 ==  Person=%d, FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n",
                 personCount, fatherCount, motherCount, spouseCount);
     }
 
-    private static long count(Session session, String relType) {
+    private static long countNodes(Session session) {
+        Result r = session.run("MATCH (p:Person) RETURN count(p) AS c");
+        return r.single().get("c").asLong();
+    }
+
+    private static long countRel(Session session, String relType) {
         Result r = session.run("MATCH ()-[r:" + relType + "]->() RETURN count(r) AS c");
         return r.single().get("c").asLong();
     }
@@ -168,5 +228,17 @@ public class MysqlToNeo4jImporter {
         m.put(k1, v1);
         m.put(k2, v2);
         return m;
+    }
+
+    private static final class Stats {
+        final long father;
+        final long mother;
+        final long spouse;
+
+        Stats(long father, long mother, long spouse) {
+            this.father = father;
+            this.mother = mother;
+            this.spouse = spouse;
+        }
     }
 }

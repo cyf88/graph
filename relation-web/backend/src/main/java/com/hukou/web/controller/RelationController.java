@@ -21,13 +21,15 @@ public class RelationController {
 
     /** 需求一：输入一个身份证号，查询其直系亲属 */
     @GetMapping("/person/direct")
-    public GraphResult directRelatives(@RequestParam String gmsfhm) {
-        return graphService.getDirectRelatives(gmsfhm.trim());
+    public GraphResult directRelatives(@RequestParam String gmsfhm,
+                                       @RequestParam(defaultValue = "0") int level) {
+        return graphService.getDirectRelatives(gmsfhm.trim(), level);
     }
 
     /** 需求二：输入两个身份证号，查询两人是否存在关系 */
     @GetMapping("/relation/path")
-    public GraphResult relationPath(@RequestParam String from, @RequestParam String to) {
-        return graphService.getRelationPath(from.trim(), to.trim());
+    public GraphResult relationPath(@RequestParam String from, @RequestParam String to,
+                                    @RequestParam(defaultValue = "0") int level) {
+        return graphService.getRelationPath(from.trim(), to.trim(), level);
     }
 }

@@ -14,6 +14,10 @@
           placeholder="请输入身份证号"
           @keyup.enter="queryDirect"
         />
+        <select v-model="directLevel" class="select" title="查询扩展级数">
+          <option :value="0">默认模式</option>
+          <option v-for="n in 8" :key="n" :value="n">{{ n }} 级关系</option>
+        </select>
         <button class="btn" :disabled="loading.direct" @click="queryDirect">
           {{ loading.direct ? '查询中…' : '查询' }}
         </button>
@@ -56,6 +60,10 @@
           placeholder="身份证号 B"
           @keyup.enter="queryRelation"
         />
+        <select v-model="relationLevel" class="select" title="查询最大级数">
+          <option :value="0">默认模式</option>
+          <option v-for="n in 8" :key="n" :value="n">{{ n }} 级以内</option>
+        </select>
         <button class="btn" :disabled="loading.relation" @click="queryRelation">
           {{ loading.relation ? '查询中…' : '查询关系' }}
         </button>
@@ -80,12 +88,24 @@ import GraphView from './components/GraphView.vue'
 import { getDirectRelatives, getRelationPath } from './api'
 
 const singleId = ref('')
+const directLevel = ref(0)
 const idA = ref('')
 const idB = ref('')
+const relationLevel = ref(0)
 const directResult = ref(null)
 const relationResult = ref(null)
 const loading = reactive({ direct: false, relation: false })
-const listedRelatives = computed(() => directResult.value?.nodes || [])
+const listedRelatives = computed(() => {
+  const nodes = directResult.value?.nodes || []
+  const seen = new Set()
+  const unique = nodes.filter(n => {
+    if (seen.has(n.id)) return false
+    seen.add(n.id)
+    return true
+  })
+  // 查询人（中心节点）固定排第一行，其余保持原顺序
+  return [...unique.filter(n => n.center), ...unique.filter(n => !n.center)]
+})
 
 function relationToCenter(person) {
   if (person.center) return '查询人'
@@ -162,7 +182,7 @@ async function queryDirect() {
   }
   loading.direct = true
   try {
-    const { data } = await getDirectRelatives(val)
+    const { data } = await getDirectRelatives(val, directLevel.value)
     directResult.value = data
   } catch (e) {
     alert('查询失败：' + (e.response?.data?.message || e.message))
@@ -180,7 +200,7 @@ async function queryRelation() {
   }
   loading.relation = true
   try {
-    const { data } = await getRelationPath(a, b)
+    const { data } = await getRelationPath(a, b, relationLevel.value)
     relationResult.value = data
   } catch (e) {
     alert('查询失败：' + (e.response?.data?.message || e.message))
@@ -214,6 +234,15 @@ body { margin: 0; background: #f5f7fa; color: #303133; font-family: "Microsoft Y
   font-size: 14px;
 }
 .input:focus { outline: none; border-color: #409eff; }
+.select {
+  padding: 9px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 14px;
+  background: #fff;
+  color: #303133;
+}
+.select:focus { outline: none; border-color: #409eff; }
 .btn {
   padding: 9px 20px;
   border: none;

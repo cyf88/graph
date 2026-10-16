@@ -108,7 +108,7 @@ function computeTreeLayout(nodes, edges) {
     if (pc === cc) continue
     anchorIds.add(c)
     if (!unitChildren.has(pc)) unitChildren.set(pc, [])
-    unitChildren.get(pc).push(cc)
+    if (!unitChildren.get(pc).includes(cc)) unitChildren.get(pc).push(cc)
     if (!unitParents.has(cc)) unitParents.set(cc, new Set())
     unitParents.get(cc).add(pc)
   }
@@ -139,31 +139,45 @@ function computeTreeLayout(nodes, edges) {
     unitMembers.get(u).push(id)
   })
 
-  // 自底向上分配横向位置（叶子按成员数占用槽位，父单元居中到子女上方；
-  // 配偶独占一个槽位，避免挤进相邻单元造成节点覆盖）
-  const unitX = new Map()
-  let nextLeaf = 0
-  function assignX(u) {
-    if (unitX.has(u)) return unitX.get(u)
+  // 子树宽度（槽位）：自身成员数与所有子女子树宽度之和的较大者
+  const subW = new Map()
+  function calcSubW(u) {
+    if (subW.has(u)) return subW.get(u)
     const kids = (unitChildren.get(u) || []).filter(k => k !== u)
-    let cx
-    if (kids.length === 0) {
-      const w = unitMembers.get(u).length
-      cx = nextLeaf + (w - 1) / 2
-      nextLeaf += w
-    } else {
-      const xs = kids.map(k => assignX(k))
-      cx = (Math.min(...xs) + Math.max(...xs)) / 2
-    }
-    unitX.set(u, cx)
-    return cx
+    const own = unitMembers.get(u).length
+    let sum = 0
+    for (const k of kids) sum += calcSubW(k)
+    const w = Math.max(own, sum)
+    subW.set(u, w)
+    return w
   }
-  unitRoots.forEach(r => assignX(r))
+  unitRoots.forEach(r => calcSubW(r))
+
+  // 自左向右布局：每个单元占据其子树宽度，父单元居中到子女上方
+  const unitX = new Map()
+  let cursor = 0
+  function place(u) {
+    if (unitX.has(u)) return
+    const kids = (unitChildren.get(u) || []).filter(k => k !== u)
+    if (kids.length === 0) {
+      const own = unitMembers.get(u).length
+      unitX.set(u, cursor + own / 2)
+      cursor += own
+      return
+    }
+    const startKids = cursor
+    for (const k of kids) place(k)
+    const kidCenters = kids.map(k => unitX.get(k))
+    const cx = (Math.min(...kidCenters) + Math.max(...kidCenters)) / 2
+    unitX.set(u, cx)
+    cursor = startKids + subW.get(u)
+  }
+  unitRoots.forEach(r => place(r))
   allUnits.forEach(u => {
     if (!unitX.has(u)) {
-      const w = unitMembers.get(u).length
-      unitX.set(u, nextLeaf + (w - 1) / 2)
-      nextLeaf += w
+      const own = unitMembers.get(u).length
+      unitX.set(u, cursor + own / 2)
+      cursor += own
     }
   })
 
@@ -184,8 +198,9 @@ function computeTreeLayout(nodes, edges) {
         || members.find(m => parentIds.has(m))
         || members[0]
       const spouse = members.find(m => m !== anchor)
-      pos.set(anchor, { x: cx, y })
-      pos.set(spouse, { x: cx + colGap, y })
+      // 配偶对称分布在单元中心两侧，让子女尽量居中显示在父母下方
+      pos.set(anchor, { x: cx - colGap / 2, y })
+      pos.set(spouse, { x: cx + colGap / 2, y })
     }
   }
   // 同一行防重叠兜底：间距小于最小值的节点从左到右依次排开
