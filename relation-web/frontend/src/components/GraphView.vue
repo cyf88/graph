@@ -161,6 +161,16 @@ function computeTreeLayout(nodes, edges) {
     unitMembers.get(u).push(id)
   })
 
+  // 每个家庭单元的血缘主线（锚点）成员：用于父子血缘线的垂直对齐
+  const unitAnchor = new Map()
+  for (const [u, members] of unitMembers) {
+    const anchor = members.find(m => anchorIds.has(m))
+      || members.find(m => parentIds.has(m) && nodeMap.get(m).xbdm === '1')
+      || members.find(m => parentIds.has(m))
+      || members[0]
+    unitAnchor.set(u, anchor)
+  }
+
   // 子树宽度（槽位）：自身成员数与所有子女子树宽度之和的较大者
   const subW = new Map()
   function calcSubW(u) {
@@ -175,31 +185,32 @@ function computeTreeLayout(nodes, edges) {
   }
   unitRoots.forEach(r => calcSubW(r))
 
-  // 自左向右布局：每个单元占据其子树宽度，父单元居中到子女上方
+  // 自左向右布局：血缘主线（锚点）垂直对齐，配偶放在锚点右侧
   const unitX = new Map()
   let cursor = 0
   function place(u) {
     if (unitX.has(u)) return
     const kids = (unitChildren.get(u) || []).filter(k => k !== u)
+    const own = unitMembers.get(u).length
     if (kids.length === 0) {
-      const own = unitMembers.get(u).length
-      unitX.set(u, cursor + own / 2)
+      unitX.set(u, cursor)
       cursor += own
       return
     }
     const startKids = cursor
     for (const k of kids) place(k)
-    const kidCenters = kids.map(k => unitX.get(k))
-    const cx = (Math.min(...kidCenters) + Math.max(...kidCenters)) / 2
-    unitX.set(u, cx)
+    const kidAnchors = kids.map(k => unitX.get(k))
+    const mean = (Math.min(...kidAnchors) + Math.max(...kidAnchors)) / 2
+    // 有配偶时单元中心在锚点右侧 0.5 列，锚点左移 0.5 列，使「夫妻整体中心」对齐子女锚点平均
+    const ax = own === 2 ? mean - 0.5 : mean
+    unitX.set(u, ax)
     cursor = startKids + subW.get(u)
   }
   unitRoots.forEach(r => place(r))
   allUnits.forEach(u => {
     if (!unitX.has(u)) {
-      const own = unitMembers.get(u).length
-      unitX.set(u, cursor + own / 2)
-      cursor += own
+      unitX.set(u, cursor)
+      cursor += unitMembers.get(u).length
     }
   })
 
@@ -209,20 +220,16 @@ function computeTreeLayout(nodes, edges) {
 
   const pos = new Map()
   for (const [u, members] of unitMembers) {
-    const cx = unitX.get(u) * colGap
+    const ax = unitX.get(u) * colGap
     const y = unitLevel.get(u) * rowGap
     if (members.length === 1) {
-      pos.set(members[0], { x: cx, y })
+      pos.set(members[0], { x: ax, y })
     } else {
-      // 血缘主线（锚点）：优先有父辈的；其次有子女的（男性优先）；否则第一个
-      const anchor = members.find(m => anchorIds.has(m))
-        || members.find(m => parentIds.has(m) && nodeMap.get(m).xbdm === '1')
-        || members.find(m => parentIds.has(m))
-        || members[0]
+      const anchor = unitAnchor.get(u)
       const spouse = members.find(m => m !== anchor)
-      // 配偶对称分布在单元中心两侧，让子女尽量居中显示在父母下方
-      pos.set(anchor, { x: cx - colGap / 2, y })
-      pos.set(spouse, { x: cx + colGap / 2, y })
+      // 锚点固定在本单元主线位置，配偶放在其右侧，保证父子血缘线垂直对齐
+      pos.set(anchor, { x: ax, y })
+      pos.set(spouse, { x: ax + colGap, y })
     }
   }
   // 同一行防重叠兜底：间距小于最小值的节点从左到右依次排开
