@@ -1,0 +1,8 @@
+# 减小 Docker 构建上下文，仅保留打包产物 jar
+target/*.original
+target/classes
+target/generated-sources
+target/maven-archiver
+target/maven-status
+target/test-classes
+*.log

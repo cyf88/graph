@@ -6,6 +6,8 @@ dependency-reduced-pom.xml
 # ===== Node / 前端 =====
 node_modules/
 dist/
+# 前端构建产物（由 ruoyi-ui 构建后拷入，随 mvn package 打进 jar）
+ruoyi-web/ruoyi-admin/src/main/resources/static/
 
 # ===== IDE =====
 .idea/
@@ -23,3 +25,7 @@ Thumbs.db
 .home/
 .m2/
 maven-settings.xml
+
+# ===== 本地工具二进制 =====
+# 下载的 docker compose 可执行文件，不进仓库
+docker-compose
