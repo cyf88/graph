@@ -18,3 +18,8 @@ Thumbs.db
 
 # ===== 日志 =====
 *.log
+
+# ===== 构建缓存与本地环境 =====
+.home/
+.m2/
+maven-settings.xml
