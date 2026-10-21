@@ -25,6 +25,9 @@ public class Config {
     public final String neo4jUser;
     public final String neo4jPassword;
     public final long queryTimeoutSeconds;
+    public final boolean guardEnabled;
+    public final int guardMaxDepth;
+    public final boolean guardIgnoreSupplementEdges;
 
     private Config(Properties props) {
         this.mysqlUrl = props.getProperty("mysql.url");
@@ -35,6 +38,9 @@ public class Config {
         this.neo4jUser = props.getProperty("neo4j.user");
         this.neo4jPassword = props.getProperty("neo4j.password");
         this.queryTimeoutSeconds = parseLong(props.getProperty("mysql.query_timeout_seconds"), 86400L);
+        this.guardEnabled = parseBoolean(props.getProperty("guard.enabled"), true);
+        this.guardMaxDepth = (int) Math.min(Math.max(parseLong(props.getProperty("guard.max_depth"), 8L), 1L), 8L);
+        this.guardIgnoreSupplementEdges = parseBoolean(props.getProperty("guard.ignore_supplement_edges"), true);
     }
 
     public static Config load(String[] args) throws IOException {
@@ -48,6 +54,11 @@ public class Config {
         defaults.setProperty("neo4j.user", "neo4j");
         defaults.setProperty("neo4j.password", "neo4j123");
         defaults.setProperty("mysql.query_timeout_seconds", "86400");
+
+        // 路径可达 guard：仅当成员与户主在图谱中「有界深度内不可达」时才补充建边
+        defaults.setProperty("guard.enabled", "true");
+        defaults.setProperty("guard.max_depth", "8");
+        defaults.setProperty("guard.ignore_supplement_edges", "true");
 
         Properties props = new Properties(defaults);
 
@@ -90,5 +101,12 @@ public class Config {
         } catch (NumberFormatException e) {
             return def;
         }
+    }
+
+    private static boolean parseBoolean(String s, boolean def) {
+        if (s == null || s.trim().isEmpty()) {
+            return def;
+        }
+        return Boolean.parseBoolean(s.trim());
     }
 }

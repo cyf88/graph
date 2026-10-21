@@ -43,19 +43,146 @@ let graph3dHasFitted = false;
 const EDGE_COLORS: Record<string, string> = {
   FATHER_OF: '#409EFF',
   MOTHER_OF: '#F56C6C',
-  MARRIED_TO: '#E6A23C'
+  MARRIED_TO: '#E6A23C',
+  SIBLING_OF: '#13C2C2',
+  GRANDPARENT_OF: '#722ED1',
+  GRANDCHILD_OF: '#9254DE',
+  MATERNAL_GRANDCHILD_OF: '#531DAB',
+  GREAT_GRANDCHILD_OF: '#7B2FBE',
+  PARENT_SIBLING_OF: '#2F54EB',
+  NEPHEW_OF: '#FA8C16',
+  IN_LAW: '#EB2F96',
+  OTHER_RELATIVE: '#8C8C8C'
 };
 
-// 与户主关系代码 -> 中文
+// 有向关系：src 为长辈，渲染时反转端点，箭头仍指向上层
+const ARROW_TO_SENIOR = new Set(['FATHER_OF', 'MOTHER_OF', 'GRANDPARENT_OF', 'PARENT_SIBLING_OF']);
+// 无向关系：不渲染箭头
+const UNDIRECTED = new Set(['MARRIED_TO', 'SIBLING_OF', 'IN_LAW', 'OTHER_RELATIVE']);
+// 参与族谱层级布局的关系（src 为长辈 → [src, target]）
+const HIERARCHY_TYPES = new Set(['FATHER_OF', 'MOTHER_OF', 'GRANDPARENT_OF', 'PARENT_SIBLING_OF']);
+// src 为晚辈的关系，层级布局时需反向（把长辈放上层）
+const REVERSE_HIERARCHY = new Set(['NEPHEW_OF', 'GRANDCHILD_OF', 'MATERNAL_GRANDCHILD_OF', 'GREAT_GRANDCHILD_OF']);
+
+// 根据关系类型 + 源节点性别，计算边的精确中文称谓（src 为标签主语）
+function edgeLabel(type: string, female: boolean): string {
+  switch (type) {
+    case 'FATHER_OF':
+      return '父亲';
+    case 'MOTHER_OF':
+      return '母亲';
+    case 'MARRIED_TO':
+      return '配偶';
+    case 'SIBLING_OF':
+      return '兄弟姐妹';
+    case 'GRANDPARENT_OF':
+      return '祖辈';
+    case 'GRANDCHILD_OF':
+      return female ? '孙女' : '孙子';
+    case 'MATERNAL_GRANDCHILD_OF':
+      return female ? '外孙女' : '外孙';
+    case 'GREAT_GRANDCHILD_OF':
+      return female ? '曾孙女' : '曾孙';
+    case 'PARENT_SIBLING_OF':
+      return female ? '姑/姨' : '伯/叔/舅';
+    case 'NEPHEW_OF':
+      return female ? '侄女/外甥女' : '侄子/外甥';
+    case 'IN_LAW':
+      return '姻亲';
+    case 'OTHER_RELATIVE':
+      return '其他亲属';
+    default:
+      return type;
+  }
+}
+
+// 与户主关系代码 -> 中文（source: 户籍-与户主关系字段.xlsx, type_code=CD000579）
 const REL_LABELS: Record<string, string> = {
-  '01': '户主',
-  '02': '配偶',
-  '03': '子',
-  '04': '女',
-  '05': '孙子女',
-  '06': '外孙子女',
-  '10': '儿媳',
-  '11': '女婿'
+  '01': '本人',
+  '02': '户主',
+  '03': '小集体户户主',
+  '10': '配偶',
+  '11': '夫',
+  '12': '妻',
+  '20': '子',
+  '21': '独生子',
+  '22': '长子',
+  '23': '次子',
+  '24': '三子',
+  '25': '四子',
+  '26': '五子',
+  '27': '养子或继子',
+  '28': '女婿',
+  '29': '其它儿子',
+  '30': '女',
+  '31': '独生女',
+  '32': '长女',
+  '33': '二女',
+  '34': '三女',
+  '35': '四女',
+  '36': '五女',
+  '37': '养女',
+  '38': '儿媳',
+  '39': '其它女儿',
+  '40': '孙子孙女或外孙子外孙女',
+  '41': '孙子',
+  '42': '孙女',
+  '43': '外孙子',
+  '44': '外孙女',
+  '45': '孙媳妇或外孙媳妇',
+  '46': '孙女婿或外孙女婿',
+  '47': '曾孙子或曾外孙子',
+  '48': '曾孙女或曾外孙女',
+  '49': '其他孙子孙女或外孙子',
+  '50': '父母',
+  '51': '父亲',
+  '52': '母亲',
+  '53': '公公',
+  '54': '婆婆',
+  '55': '岳父',
+  '56': '岳母',
+  '57': '继父或养父',
+  '58': '继母或养母',
+  '59': '其它父母关系',
+  '60': '祖父母或外祖父母',
+  '61': '祖父',
+  '62': '祖母',
+  '63': '外祖父',
+  '64': '外祖母',
+  '65': '配偶的祖父母或外祖父母',
+  '66': '曾祖父',
+  '67': '曾祖母',
+  '68': '配偶的曾祖父母',
+  '69': '其它祖父母或外祖父母关系',
+  '70': '兄弟姐妹',
+  '71': '兄',
+  '72': '嫂',
+  '73': '弟',
+  '74': '弟媳',
+  '75': '姐姐',
+  '76': '姐夫',
+  '77': '妹妹',
+  '78': '妹夫',
+  '79': '其它兄弟姐妹',
+  '81': '伯父',
+  '82': '伯母',
+  '83': '叔父',
+  '84': '婶母',
+  '85': '舅父',
+  '86': '舅母',
+  '87': '姨父',
+  '88': '姨母',
+  '89': '姑父',
+  '90': '姑母',
+  '91': '堂兄弟堂姐妹',
+  '92': '表兄弟表姐妹',
+  '93': '侄子',
+  '94': '侄女',
+  '95': '外甥',
+  '96': '外甥女',
+  '97': '其他亲属',
+  '98': '保姆',
+  '99': '非亲属'
 };
 
 /**
@@ -83,24 +210,40 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
     if (ra !== rb) parent.set(ra, rb);
   };
 
-  const childEdges: any[] = [];
+  // 代差：parent 是 child 的上几代
+  const GENERATION: Record<string, number> = {
+    FATHER_OF: 1,
+    MOTHER_OF: 1,
+    PARENT_SIBLING_OF: 1,
+    NEPHEW_OF: 1,
+    GRANDCHILD_OF: 2,
+    MATERNAL_GRANDCHILD_OF: 2,
+    GRANDPARENT_OF: 2,
+    GREAT_GRANDCHILD_OF: 3
+  };
+  const childEdges: any[] = [];  // [parent, child, generation]
   for (const e of edges) {
     if (e.type === 'MARRIED_TO') {
       union(e.source, e.target);
-    } else {
-      childEdges.push([e.source, e.target]);
+    } else if (HIERARCHY_TYPES.has(e.type)) {
+      // 长辈 -> 晚辈
+      childEdges.push([e.source, e.target, GENERATION[e.type] || 1]);
+    } else if (REVERSE_HIERARCHY.has(e.type)) {
+      // src 是晚辈，反向把长辈放上层
+      childEdges.push([e.target, e.source, GENERATION[e.type] || 1]);
     }
+    // SIBLING_OF / IN_LAW / OTHER_RELATIVE 不参与层级，仅作叠加边
   }
 
   const parentOfChild = new Map();
-  for (const [p, c] of childEdges) {
+  for (const [p, c, gen] of childEdges) {
     if (!parentOfChild.has(c)) parentOfChild.set(c, []);
-    parentOfChild.get(c).push(p);
+    parentOfChild.get(c).push([p, gen]);
   }
   for (const e of edges) {
     if (e.type !== 'MARRIED_TO') continue;
-    const pa = parentOfChild.get(e.source) || [];
-    const pb = parentOfChild.get(e.target) || [];
+    const pa = (parentOfChild.get(e.source) || []).map(([p]: any) => p);
+    const pb = (parentOfChild.get(e.target) || []).map(([p]: any) => p);
     const allParents = [...pa, ...pb];
     for (let i = 1; i < allParents.length; i++) {
       union(allParents[0], allParents[i]);
@@ -111,16 +254,19 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
 
   const anchorIds = new Set();
   const unitChildren = new Map();
-  const unitParents = new Map();
-  for (const [p, c] of childEdges) {
+  const unitParents = new Map();  // unit -> [[parentUnit, generation], ...]
+  for (const [p, c, gen] of childEdges) {
     const pc = find(p);
     const cc = find(c);
     if (pc === cc) continue;
     anchorIds.add(c);
     if (!unitChildren.has(pc)) unitChildren.set(pc, []);
     if (!unitChildren.get(pc).includes(cc)) unitChildren.get(pc).push(cc);
-    if (!unitParents.has(cc)) unitParents.set(cc, new Set());
-    unitParents.get(cc).add(pc);
+    if (!unitParents.has(cc)) unitParents.set(cc, []);
+    const list = unitParents.get(cc);
+    if (!list.some(([pp]: any) => pp === pc)) {
+      list.push([pc, gen]);
+    }
   }
 
   const allUnits = new Set(ids.map((id) => find(id)));
@@ -133,9 +279,9 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
     visiting.add(u);
     const parents = unitParents.get(u);
     let lv = 0;
-    if (parents && parents.size > 0) {
-      for (const p of parents) {
-        lv = Math.max(lv, computeLevel(p) + 1);
+    if (parents && parents.length > 0) {
+      for (const [p, gen] of parents) {
+        lv = Math.max(lv, computeLevel(p) + gen);
       }
     }
     visiting.delete(u);
@@ -333,7 +479,7 @@ function renderGraph() {
     const p = pos.get(n.id);
     return {
       id: n.id,
-      label: n.name,
+      label: n.yhzgxdm === '02' ? n.name + '（户主）' : n.name,
       x: p.x,
       y: p.y,
       gmsfhm: n.gmsfhm,
@@ -344,16 +490,17 @@ function renderGraph() {
     };
   });
 
+  const xbdmMap = new Map(props.nodes.map((n: any) => [n.id, n.xbdm]));
   const gEdges = props.edges.map((e: any) => {
-    const reverse = e.type === 'FATHER_OF' || e.type === 'MOTHER_OF';
+    const reverse = ARROW_TO_SENIOR.has(e.type);
     const color = EDGE_COLORS[e.type] || '#888';
     const edge: any = {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: e.label || e.type,
+      label: edgeLabel(e.type, xbdmMap.get(e.source) === '2'),
       style: { stroke: color }
     };
-    if (e.type !== 'MARRIED_TO') {
+    if (!UNDIRECTED.has(e.type)) {
       edge.sourceAnchor = 1;
       edge.targetAnchor = 3;
       edge.style.endArrow = { path: G6.Arrow.triangle(6, 8, 0), fill: color };
@@ -386,7 +533,7 @@ function build3dData() {
     const rel = REL_LABELS[n.yhzgxdm] || n.yhzgxdm || '-';
     return {
       id: n.id,
-      name: n.name,
+      name: n.yhzgxdm === '02' ? n.name + '（户主）' : n.name,
       color: n.xbdm === '1' ? '#409EFF' : '#F56C6C',
       x: p.x,
       y: -p.y,
@@ -396,15 +543,16 @@ function build3dData() {
       rel
     };
   });
+  const xbdmMap = new Map(props.nodes.map((n: any) => [n.id, n.xbdm]));
   const links = props.edges.map((e: any) => {
-    const reverse = e.type === 'FATHER_OF' || e.type === 'MOTHER_OF';
+    const reverse = ARROW_TO_SENIOR.has(e.type);
     const color = EDGE_COLORS[e.type] || '#8892a8';
     return {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: e.label || e.type,
+      label: edgeLabel(e.type, xbdmMap.get(e.source) === '2'),
       color,
-      directional: e.type !== 'MARRIED_TO'
+      directional: !UNDIRECTED.has(e.type)
     };
   });
   return { nodes, links };

@@ -9,7 +9,7 @@
     <version>1.0.0</version>
     <packaging>jar</packaging>
     <name>hukou-relation-supplement</name>
-    <description>根据“与户主关系”补充 Neo4j 亲属关系（配偶/父母/子女）</description>
+    <description>根据“与户主关系”补充 Neo4j 亲属关系（配偶/父母/子女/兄弟姐妹/祖孙/伯叔舅姑姨/侄甥/姻亲等）</description>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>

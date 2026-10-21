@@ -14,7 +14,8 @@
         />
         <el-select v-model="directLevel" style="width: 160px" title="查询扩展级数">
           <el-option :value="0" label="默认模式" />
-          <el-option v-for="n in 8" :key="n" :value="n" :label="n + ' 级关系'" />
+          <el-option v-for="n in 16" :key="n" :value="n" :label="n + ' 级关系'" />
+          <el-option :value="-1" label="不限级数" />
         </el-select>
         <el-button type="primary" :loading="loading.direct" @click="queryDirect">
           {{ loading.direct ? '查询中…' : '查询' }}
@@ -32,7 +33,7 @@
               </template>
             </el-table-column>
             <el-table-column prop="name" label="姓名" min-width="110">
-              <template #default="scope">{{ scope.row.name || '未知' }}</template>
+              <template #default="scope">{{ (scope.row.name || '未知') + (scope.row.yhzgxdm === '02' ? '（户主）' : '') }}</template>
             </el-table-column>
             <el-table-column prop="gmsfhm" label="身份证号" min-width="190">
               <template #default="scope">{{ scope.row.gmsfhm || '-' }}</template>
@@ -55,7 +56,8 @@
         <el-input v-model="idB" placeholder="身份证号 B" clearable style="max-width: 260px" @keyup.enter="queryRelation" />
         <el-select v-model="relationLevel" style="width: 160px" title="查询最大级数">
           <el-option :value="0" label="默认模式" />
-          <el-option v-for="n in 8" :key="n" :value="n" :label="n + ' 级以内'" />
+          <el-option v-for="n in 16" :key="n" :value="n" :label="n + ' 级以内'" />
+          <el-option :value="-1" label="不限级数" />
         </el-select>
         <el-button type="primary" :loading="loading.relation" @click="queryRelation">
           {{ loading.relation ? '查询中…' : '查询关系' }}
@@ -112,20 +114,67 @@ function relationToCenter(person: GraphNode): string {
   const center = directResult.value?.nodes?.find((node) => node.center);
   if (!center) return '-';
   const edges = directResult.value?.edges || [];
-  const edge = edges.find((item) =>
-    item.type === 'MARRIED_TO'
-      ? (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id)
-      : (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id)
+  const isParentEdge = (item: any) => item.type === 'FATHER_OF' || item.type === 'MOTHER_OF';
+  const edge = edges.find(
+    (item) => (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id)
   );
-  if (edge?.type === 'MARRIED_TO') return '配偶';
-  if (edge && edge.target === center.id) return edge.type === 'MOTHER_OF' ? '母亲' : '父亲';
-  if (edge && edge.source === center.id) return person.xbdm === '2' ? '女儿' : '儿子';
+  if (edge) {
+    switch (edge.type) {
+      case 'MARRIED_TO':
+        return '配偶';
+      case 'FATHER_OF':
+      case 'MOTHER_OF': {
+        if (edge.target === center.id) return edge.type === 'MOTHER_OF' ? '母亲' : '父亲';
+        if (edge.source === center.id) return person.xbdm === '2' ? '女儿' : '儿子';
+        return '亲属';
+      }
+      case 'GRANDPARENT_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '祖母/外祖母' : '祖父/外祖父';
+        return '祖辈';
+      case 'GRANDCHILD_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '孙女' : '孙子';
+        if (edge.source === center.id) return person.xbdm === '2' ? '祖母' : '祖父';
+        return '孙子/孙女';
+      case 'MATERNAL_GRANDCHILD_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '外孙女' : '外孙';
+        if (edge.source === center.id) return person.xbdm === '2' ? '外婆' : '外公';
+        return '外孙/外孙女';
+      case 'GREAT_GRANDCHILD_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '曾孙女' : '曾孙';
+        if (edge.source === center.id) return person.xbdm === '2' ? '曾祖母' : '曾祖父';
+        return '曾孙/曾孙女';
+      case 'PARENT_SIBLING_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '姑/姨' : '伯/叔/舅';
+        if (edge.source === center.id) return person.xbdm === '2' ? '侄女/外甥女' : '侄子/外甥';
+        return '伯/叔/舅/姑/姨';
+      case 'NEPHEW_OF':
+        if (edge.target === center.id) return person.xbdm === '2' ? '侄女/外甥女' : '侄子/外甥';
+        if (edge.source === center.id) return person.xbdm === '2' ? '姑/姨' : '伯/叔/舅';
+        return '侄甥';
+      case 'SIBLING_OF': {
+        const siblingBirthDate = birthDateFromId(person.gmsfhm);
+        const centerBirthDate = birthDateFromId(center.gmsfhm);
+        if (siblingBirthDate && centerBirthDate && siblingBirthDate !== centerBirthDate) {
+          const isOlder = siblingBirthDate < centerBirthDate;
+          if (person.xbdm === '2') return isOlder ? '姐姐' : '妹妹';
+          return isOlder ? '哥哥' : '弟弟';
+        }
+        return person.xbdm === '2' ? '姐妹' : '兄弟';
+      }
+      case 'IN_LAW':
+        return '姻亲';
+      case 'OTHER_RELATIVE':
+        return '其他亲属';
+      default:
+        return '亲属';
+    }
+  }
 
-  const centerParents = new Set(edges.filter((item) => item.target === center.id && item.type !== 'MARRIED_TO').map((item) => item.source));
+  const centerParents = new Set(edges.filter((item) => item.target === center.id && isParentEdge(item)).map((item) => item.source));
   const siblingIds = new Set(
-    edges.filter((item) => item.target !== center.id && centerParents.has(item.source) && item.type !== 'MARRIED_TO').map((item) => item.target)
+    edges.filter((item) => item.target !== center.id && centerParents.has(item.source) && isParentEdge(item)).map((item) => item.target)
   );
-  const siblingParentEdge = edges.find((item) => item.target === person.id && centerParents.has(item.source) && item.type !== 'MARRIED_TO');
+  const siblingParentEdge = edges.find((item) => item.target === person.id && centerParents.has(item.source) && isParentEdge(item));
   if (siblingParentEdge) {
     const siblingBirthDate = birthDateFromId(person.gmsfhm);
     const centerBirthDate = birthDateFromId(center.gmsfhm);
@@ -137,7 +186,7 @@ function relationToCenter(person: GraphNode): string {
     return person.xbdm === '2' ? '姐妹' : '兄弟';
   }
 
-  const siblingChildEdge = edges.find((item) => item.target === person.id && siblingIds.has(item.source) && item.type !== 'MARRIED_TO');
+  const siblingChildEdge = edges.find((item) => item.target === person.id && siblingIds.has(item.source) && isParentEdge(item));
   if (siblingChildEdge) {
     const sibling = directResult.value?.nodes.find((node) => node.id === siblingChildEdge.source);
     const isNiece = person.xbdm === '2';

@@ -47,7 +47,16 @@ import * as echarts from 'echarts';
 const COLOR_MAP: Record<string, string> = {
   FATHER_OF: '#409EFF',
   MOTHER_OF: '#F56C6C',
-  MARRIED_TO: '#E6A23C'
+  MARRIED_TO: '#E6A23C',
+  SIBLING_OF: '#13C2C2',
+  GRANDPARENT_OF: '#722ED1',
+  GRANDCHILD_OF: '#9254DE',
+  MATERNAL_GRANDCHILD_OF: '#531DAB',
+  GREAT_GRANDCHILD_OF: '#7B2FBE',
+  PARENT_SIBLING_OF: '#2F54EB',
+  NEPHEW_OF: '#FA8C16',
+  IN_LAW: '#EB2F96',
+  OTHER_RELATIVE: '#8C8C8C'
 };
 
 const pieChartRef = ref<HTMLElement | null>(null);

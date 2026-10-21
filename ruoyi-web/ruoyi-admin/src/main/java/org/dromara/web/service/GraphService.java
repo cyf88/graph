@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 户籍关系图谱查询服务
@@ -24,12 +25,30 @@ import java.util.Map;
 @Service
 public class GraphService {
 
-    private static final Map<String, String> REL_LABELS = Map.of(
-        "FATHER_OF", "父亲",
-        "MOTHER_OF", "母亲",
-        "MARRIED_TO", "配偶");
+    private static final Map<String, String> REL_LABELS = Map.ofEntries(
+        Map.entry("FATHER_OF", "父亲"),
+        Map.entry("MOTHER_OF", "母亲"),
+        Map.entry("MARRIED_TO", "配偶"),
+        Map.entry("SIBLING_OF", "兄弟姐妹"),
+        Map.entry("GRANDPARENT_OF", "祖辈"),
+        Map.entry("GRANDCHILD_OF", "孙子/孙女"),
+        Map.entry("MATERNAL_GRANDCHILD_OF", "外孙/外孙女"),
+        Map.entry("GREAT_GRANDCHILD_OF", "曾孙/曾孙女"),
+        Map.entry("PARENT_SIBLING_OF", "伯叔舅姑姨"),
+        Map.entry("NEPHEW_OF", "侄甥"),
+        Map.entry("IN_LAW", "姻亲"),
+        Map.entry("OTHER_RELATIVE", "其他亲属"));
 
-    /** 默认模式：查询配偶、父母、子女、兄弟姐妹及其配偶、子女 */
+    /** 结构性关系（导入器 + 补充工具都会产生） */
+    private static final String STRUCT_REL_TYPES = "FATHER_OF|MOTHER_OF|MARRIED_TO";
+    /** 由 relation-supplement 依据“与户主关系”补充的关系类型 */
+    private static final String NEW_REL_TYPES = "SIBLING_OF|GRANDPARENT_OF|GRANDCHILD_OF|MATERNAL_GRANDCHILD_OF|GREAT_GRANDCHILD_OF|PARENT_SIBLING_OF|NEPHEW_OF|IN_LAW|OTHER_RELATIVE";
+    /** 全部关系类型竖线串，用于 Cypher 关系过滤 */
+    private static final String REL_TYPES_PATTERN = STRUCT_REL_TYPES + "|" + NEW_REL_TYPES;
+    /** 无向关系类型（描述与渲染时不区分方向） */
+    private static final Set<String> UNDIRECTED = Set.of("MARRIED_TO", "SIBLING_OF", "IN_LAW", "OTHER_RELATIVE");
+
+    /** 默认模式：查询配偶、父母、子女、兄弟姐妹及其配偶、子女，以及补充的直系/旁系亲属 */
     private static final String DEFAULT_DIRECT_QUERY = """
         MATCH (p:Person {gmsfhm: $gmsfhm})
         OPTIONAL MATCH (p)-[:MARRIED_TO]-(sp:Person)
@@ -39,13 +58,15 @@ public class GraphService {
         WHERE sib <> p
         OPTIONAL MATCH (sib)-[:MARRIED_TO]-(sibSpouse:Person)
         OPTIONAL MATCH (sib)-[:FATHER_OF|MOTHER_OF]->(sibChild:Person)
+        OPTIONAL MATCH (p)-[:%s]-(nb:Person)
         WITH p,
           collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child)
-            + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild) + [p] AS allNodes
+            + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild)
+            + collect(DISTINCT nb) + [p] AS allNodes
         UNWIND allNodes AS n
         WITH p, collect(DISTINCT n) AS nodes
         UNWIND nodes AS n
-        OPTIONAL MATCH (n)-[r:FATHER_OF|MOTHER_OF|MARRIED_TO]-(m)
+        OPTIONAL MATCH (n)-[r:%s]-(m)
         WHERE m IN nodes
         WITH p, nodes, collect(DISTINCT r) AS rels
         RETURN
@@ -60,11 +81,14 @@ public class GraphService {
     }
 
     /** 需求一：查询一个人的近亲属。
-     *  level=0：默认模式（配偶、父母、子女、兄弟姐妹及其配偶、子女）
-     *  level=1..8：按级数扩展（1 级=直接关联节点，最多 8 级）
+     *  level=0：默认模式（配偶、父母、子女、兄弟姐妹及其配偶、子女，以及补充的祖孙、伯叔舅姑姨、侄甥、姻亲、其他亲属）
+     *  level=1..16：按级数扩展（1 级=直接关联节点，最多 16 级）
+     *  level<0：不限级数（查询所有可达关联节点）
      */
     public GraphResult getDirectRelatives(String gmsfhm, int level) {
-        String query = level <= 0 ? DEFAULT_DIRECT_QUERY : buildLevelQuery(level);
+        String query = level == 0
+                ? DEFAULT_DIRECT_QUERY.formatted(NEW_REL_TYPES, REL_TYPES_PATTERN)
+                : buildLevelQuery(level);
 
         try (Session session = driver.session()) {
             Result result = session.run(query, Map.of("gmsfhm", gmsfhm));
@@ -79,34 +103,40 @@ public class GraphService {
                 .map(GraphNode::name)
                 .findFirst()
                 .orElse(gmsfhm);
-            String desc = level <= 0
-                ? centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女）"
-                : centerName + " 的 " + Math.min(Math.max(level, 1), 8) + " 级关系";
+            String desc;
+            if (level == 0) {
+                desc = centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女、祖父母、伯叔舅姑姨、侄甥、姻亲等）";
+            } else if (level < 0) {
+                desc = centerName + " 的全部关联亲属（不限级数）";
+            } else {
+                desc = centerName + " 的 " + Math.min(Math.max(level, 1), 16) + " 级关系";
+            }
             return new GraphResult(true, nodes, edges, desc);
         }
     }
 
     private String buildLevelQuery(int level) {
-        int depth = Math.min(Math.max(level, 1), 8);
+        String pathRange = level < 0 ? "*" : "*1.." + Math.min(Math.max(level, 1), 16);
         return """
             MATCH (p:Person {gmsfhm: $gmsfhm})
-            OPTIONAL MATCH (p)-[*1..%d]-(n:Person)
+            OPTIONAL MATCH (p)-[%s]-(n:Person)
             WITH p, collect(DISTINCT n) + [p] AS allNodes
             UNWIND allNodes AS n
             WITH p, collect(DISTINCT n) AS nodes
             UNWIND nodes AS n
-            OPTIONAL MATCH (n)-[r:FATHER_OF|MOTHER_OF|MARRIED_TO]-(m)
+            OPTIONAL MATCH (n)-[r:%s]-(m)
             WHERE m IN nodes
             WITH p, nodes, collect(DISTINCT r) AS rels
             RETURN
               [n IN nodes | {id: n.gmsfhm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, yhzgxdm: n.yhzgxdm, center: n = p}] AS nodes,
               [r IN rels | {source: startNode(r).gmsfhm, target: endNode(r).gmsfhm, type: type(r)}] AS edges
-            """.formatted(depth);
+            """.formatted(pathRange, REL_TYPES_PATTERN);
     }
 
     /** 需求二：查询任意两人的关系路径。
-     *  level=0：默认（最短路径，最多 8 级）
-     *  level=1..8：限制最短路径的最大级数
+     *  level=0：默认（最短路径，最多 16 级）
+     *  level=1..16：限制最短路径的最大级数
+     *  level<0：不限级数
      */
     public GraphResult getRelationPath(String from, String to, int level) {
         // 同一个人
@@ -114,15 +144,15 @@ public class GraphService {
             return getSinglePerson(from);
         }
 
-        int maxDepth = level <= 0 ? 8 : Math.min(Math.max(level, 1), 8);
+        String pathRange = level < 0 ? "*" : "*.." + (level <= 0 ? 16 : Math.min(Math.max(level, 1), 16));
         String query = """
             MATCH (a:Person {gmsfhm: $from}), (b:Person {gmsfhm: $to})
-            MATCH path = shortestPath((a)-[*..%d]-(b))
+            MATCH path = shortestPath((a)-[%s]-(b))
             WITH a, b, nodes(path) AS ns, relationships(path) AS rs
             RETURN
               [n IN ns | {id: n.gmsfhm, name: n.xm, gmsfhm: n.gmsfhm, xbdm: n.xbdm, endpoint: n = a OR n = b}] AS nodes,
               [r IN rs | {source: startNode(r).gmsfhm, target: endNode(r).gmsfhm, type: type(r)}] AS edges
-            """.formatted(maxDepth);
+            """.formatted(pathRange);
 
         try (Session session = driver.session()) {
             Result result = session.run(query, Map.of("from", from, "to", to));
@@ -220,7 +250,7 @@ public class GraphService {
             String src = nameById.getOrDefault(e.source(), e.source());
             String tgt = nameById.getOrDefault(e.target(), e.target());
             String label = e.label();
-            if ("MARRIED_TO".equals(e.type())) {
+            if (UNDIRECTED.contains(e.type())) {
                 steps.add(src + " 与 " + tgt + " 是" + label);
             } else {
                 steps.add(src + " 是 " + tgt + " 的" + label);

@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,18 +21,33 @@ import java.util.Set;
 /**
  * 根据“与户主关系”(yhzgxdm) 补充 Neo4j 亲属关系。
  *
- * 关系代码字典来源：《户籍-与户主关系字段.xlsx》，此处仅抽取可映射到原有
- * 三类关系（FATHER_OF / MOTHER_OF / MARRIED_TO）的代码，其余不扩充。
+ * 关系代码字典来源：《户籍-与户主关系字段.xlsx》(type_code=CD000579)。
  *
  * 处理逻辑：
  *   1. 以“户号 hh”分组，先找出每户的“户主”(yhzgxdm = '02')；
- *   2. 流式读取全部人员，对户内每个成员按与户主关系代码补充一条关系：
- *        配偶(10/11/12)             -> MARRIED_TO（户主 与 成员 无向）
- *        父亲(51/57)                -> FATHER_OF（成员 -> 户主）
- *        母亲(52/58)                -> MOTHER_OF（成员 -> 户主）
- *        父母(50/59)                -> 按成员性别推断 FATHER_OF / MOTHER_OF
- *        子女(20..29、30..39，除28/38) -> 按户主性别推断 FATHER_OF / MOTHER_OF（户主 -> 成员）
- *   其余代码（兄弟姐妹、祖孙、姻亲、非亲属等）不参与补充。
+ *   2. 流式读取全部人员，对户内每个成员按与户主关系代码补充一条关系；
+ *   3. 仅在“成员与户主在图谱中路径不可达”时补充（有界深度 guard，见 Config#guardMaxDepth），
+ *      已可达则跳过；新建的边打 origin='supplement' 标记，guard 会忽略这些边，
+ *      因此可重复运行且结果与批次顺序无关。
+ *
+ * 关系类型与代码映射（有向关系 src 为标签主语，无向关系按 gmsfhm 字典序规范化）：
+ *   配偶(10/11/12)                       -> MARRIED_TO           无向
+ *   父亲(51/57)                          -> FATHER_OF            成员->户主
+ *   母亲(52/58)                          -> MOTHER_OF            成员->户主
+ *   父母(50/59)                          -> 按成员性别推断 FATHER_OF / MOTHER_OF
+ *   子女(20..27、29、30..37、39)          -> 按户主性别推断 FATHER_OF / MOTHER_OF（户主->成员）
+ *   女婿/儿媳(28/38)、公婆岳父母(53..56)、
+ *     配偶的祖辈(65/68)、嫂弟媳姐夫妹夫(72/74/76/78)、
+ *   孙媳孙女婿(45/46)                  -> IN_LAW               无向
+ *   内孙/孙女(41/42)                    -> GRANDCHILD_OF        成员->户主
+ *   外孙/外孙女(43/44)                  -> MATERNAL_GRANDCHILD_OF 成员->户主
+ *   曾孙(47/48)                         -> GREAT_GRANDCHILD_OF  成员->户主（代差3）
+ *   祖辈(60..64、66/67、69)              -> GRANDPARENT_OF       成员->户主（含曾祖，代差近似）
+ *   兄弟姐妹(70/71/73/75/77/79)          -> SIBLING_OF           无向
+ *   伯叔舅姑姨及其配偶(81..90)            -> PARENT_SIBLING_OF    成员->户主
+ *   侄甥(93..96)                         -> NEPHEW_OF            成员->户主
+ *   堂表兄弟姐妹(91/92)、其他亲属(97)      -> OTHER_RELATIVE       无向
+ *   户主/本人(01/02/03)、保姆(98)、非亲属(99) -> 不建边
  *
  * 性别代码遵循 GB/T 2261.1：1=男，2=女；其余视为未知（跳过）。
  */
@@ -47,6 +63,21 @@ public class HouseholdRelSupplement {
     private static final Set<String> CHILD = Set.of(
             "20", "21", "22", "23", "24", "25", "26", "27", "29",
             "30", "31", "32", "33", "34", "35", "36", "37", "39");
+    private static final Set<String> IN_LAW = Set.of(
+            "28", "38", "45", "46", "53", "54", "55", "56", "65", "68", "72", "74", "76", "78");
+    /** 内孙：孙子/孙女（41/42），成员 -> 户主 */
+    private static final Set<String> GRANDCHILD = Set.of("41", "42");
+    /** 外孙：外孙子/外孙女（43/44），成员 -> 户主 */
+    private static final Set<String> MATERNAL_GRANDCHILD = Set.of("43", "44");
+    /** 曾孙：47/48（代差3，不分内外），成员 -> 户主 */
+    private static final Set<String> GREAT_GRANDCHILD = Set.of("47", "48");
+    /** 祖辈：成员是户主的长辈，边方向 成员 -> 户主（含曾祖 66/67，代差近似） */
+    private static final Set<String> GRAND_ASC = Set.of("60", "61", "62", "63", "64", "66", "67", "69");
+    private static final Set<String> SIBLING = Set.of("70", "71", "73", "75", "77", "79");
+    private static final Set<String> PARENT_SIBLING = Set.of(
+            "81", "82", "83", "84", "85", "86", "87", "88", "89", "90");
+    private static final Set<String> NEPHEW = Set.of("93", "94", "95", "96");
+    private static final Set<String> OTHER = Set.of("91", "92", "97");
 
     public static void main(String[] args) throws Exception {
         Config config = Config.load(args);
@@ -62,6 +93,8 @@ public class HouseholdRelSupplement {
              Statement stmt = conn.createStatement()) {
 
             System.out.printf("源表：%s，批大小：%d，Neo4j：%s%n", config.table, BATCH_SIZE, config.neo4jUri);
+            System.out.printf("路径可达 guard：enabled=%s, maxDepth=%d, ignoreSupplementEdges=%s%n",
+                    config.guardEnabled, config.guardMaxDepth, config.guardIgnoreSupplementEdges);
 
             session.run("CREATE CONSTRAINT person_gmsfhm_unique IF NOT EXISTS "
                     + "FOR (p:Person) REQUIRE p.gmsfhm IS UNIQUE").consume();
@@ -91,8 +124,9 @@ public class HouseholdRelSupplement {
             System.out.println("已读取户主数量：" + heads.size());
 
             // 2. 流式读取全部人员，按与户主关系补充
+            EnumMap<Type, Long> createdByType = new EnumMap<>(Type.class);
             List<Rel> batch = new ArrayList<>(BATCH_SIZE);
-            long total = 0, father = 0, mother = 0, spouse = 0;
+            long candidates = 0, total = 0;
             String memberSql = "SELECT gmsfhm, xbdm, hh, yhzgxdm FROM " + config.table;
             try (ResultSet rs = stmt.executeQuery(memberSql)) {
                 while (rs.next()) {
@@ -109,95 +143,133 @@ public class HouseholdRelSupplement {
                         continue;
                     }
                     batch.add(rel);
-                    total++;
+                    candidates++;
                     if (batch.size() >= BATCH_SIZE) {
-                        Stats s = writeBatch(session, batch);
-                        father += s.father;
-                        mother += s.mother;
-                        spouse += s.spouse;
+                        total += writeBatch(session, batch, config, createdByType);
                         batch.clear();
-                        logProgress(total);
+                        logProgress(candidates);
                     }
                 }
                 if (!batch.isEmpty()) {
-                    Stats s = writeBatch(session, batch);
-                    father += s.father;
-                    mother += s.mother;
-                    spouse += s.spouse;
+                    total += writeBatch(session, batch, config, createdByType);
                 }
             }
 
-            System.out.printf("补充关系完成：共生成 %d 条关系%n", total);
-            System.out.printf("本次补充：FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n", father, mother, spouse);
+            System.out.printf("候选关系：%d，实际新增：%d，跳过（已可达）：%d%n",
+                    candidates, total, candidates - total);
+            for (Type t : Type.values()) {
+                long c = createdByType.getOrDefault(t, 0L);
+                if (c > 0) {
+                    System.out.printf("本次新增 %s = %d%n", t.relName, c);
+                }
+            }
             printSummary(session);
         }
     }
 
     private static Rel buildRel(String code, String memberGmsfhm, String memberXbdm, HeadInfo head) {
+        if (code == null) {
+            return null;
+        }
         if (SPOUSE.contains(code)) {
-            String a = memberGmsfhm.compareTo(head.gmsfhm) < 0 ? memberGmsfhm : head.gmsfhm;
-            String b = memberGmsfhm.compareTo(head.gmsfhm) < 0 ? head.gmsfhm : memberGmsfhm;
-            return Rel.spouse(a, b);
+            return Rel.of(Type.MARRIED_TO, memberGmsfhm, head.gmsfhm);
         }
         if (FATHER.contains(code)) {
-            return Rel.father(memberGmsfhm, head.gmsfhm);
+            return Rel.of(Type.FATHER_OF, memberGmsfhm, head.gmsfhm);
         }
         if (MOTHER.contains(code)) {
-            return Rel.mother(memberGmsfhm, head.gmsfhm);
+            return Rel.of(Type.MOTHER_OF, memberGmsfhm, head.gmsfhm);
         }
         if (PARENT.contains(code)) {
             if ("1".equals(memberXbdm)) {
-                return Rel.father(memberGmsfhm, head.gmsfhm);
+                return Rel.of(Type.FATHER_OF, memberGmsfhm, head.gmsfhm);
             }
             if ("2".equals(memberXbdm)) {
-                return Rel.mother(memberGmsfhm, head.gmsfhm);
+                return Rel.of(Type.MOTHER_OF, memberGmsfhm, head.gmsfhm);
             }
             return null;
         }
         if (CHILD.contains(code)) {
             if ("1".equals(head.xbdm)) {
-                return Rel.father(head.gmsfhm, memberGmsfhm);
+                return Rel.of(Type.FATHER_OF, head.gmsfhm, memberGmsfhm);
             }
             if ("2".equals(head.xbdm)) {
-                return Rel.mother(head.gmsfhm, memberGmsfhm);
+                return Rel.of(Type.MOTHER_OF, head.gmsfhm, memberGmsfhm);
             }
             return null;
+        }
+        if (IN_LAW.contains(code)) {
+            return Rel.of(Type.IN_LAW, memberGmsfhm, head.gmsfhm);
+        }
+        if (GRANDCHILD.contains(code)) {
+            return Rel.of(Type.GRANDCHILD_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (MATERNAL_GRANDCHILD.contains(code)) {
+            return Rel.of(Type.MATERNAL_GRANDCHILD_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (GREAT_GRANDCHILD.contains(code)) {
+            return Rel.of(Type.GREAT_GRANDCHILD_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (GRAND_ASC.contains(code)) {
+            return Rel.of(Type.GRANDPARENT_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (SIBLING.contains(code)) {
+            return Rel.of(Type.SIBLING_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (PARENT_SIBLING.contains(code)) {
+            return Rel.of(Type.PARENT_SIBLING_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (NEPHEW.contains(code)) {
+            return Rel.of(Type.NEPHEW_OF, memberGmsfhm, head.gmsfhm);
+        }
+        if (OTHER.contains(code)) {
+            return Rel.of(Type.OTHER_RELATIVE, memberGmsfhm, head.gmsfhm);
         }
         return null;
     }
 
-    private static Stats writeBatch(Session session, List<Rel> rels) {
+    /**
+     * 批量写入一组关系，返回本次实际新增的边数（guard 判定为“已可达”的会被跳过）。
+     */
+    private static long writeBatch(Session session, List<Rel> rels, Config config,
+                                   EnumMap<Type, Long> createdByType) {
         return session.executeWrite(tx -> {
-            List<Map<String, Object>> father = new ArrayList<>();
-            List<Map<String, Object>> mother = new ArrayList<>();
-            List<Map<String, Object>> spouse = new ArrayList<>();
+            EnumMap<Type, List<Map<String, Object>>> groups = new EnumMap<>(Type.class);
             for (Rel r : rels) {
-                switch (r.type) {
-                    case FATHER -> father.add(map("parent", r.a, "child", r.b));
-                    case MOTHER -> mother.add(map("parent", r.a, "child", r.b));
-                    case SPOUSE -> spouse.add(map("a", r.a, "b", r.b));
-                }
+                groups.computeIfAbsent(r.type, k -> new ArrayList<>()).add(map("a", r.a, "b", r.b));
             }
-            if (!father.isEmpty()) {
-                tx.run("UNWIND $rows AS row "
-                        + "MERGE (p:Person {gmsfhm: row.parent}) "
-                        + "MERGE (c:Person {gmsfhm: row.child}) "
-                        + "MERGE (p)-[:FATHER_OF]->(c)", Map.of("rows", father)).consume();
+            long created = 0;
+            for (Map.Entry<Type, List<Map<String, Object>>> e : groups.entrySet()) {
+                Type type = e.getKey();
+                Result result = tx.run(buildWriteQuery(type, config), Map.of("rows", e.getValue()));
+                long c = result.consume().counters().relationshipsCreated();
+                created += c;
+                createdByType.merge(type, c, Long::sum);
             }
-            if (!mother.isEmpty()) {
-                tx.run("UNWIND $rows AS row "
-                        + "MERGE (p:Person {gmsfhm: row.parent}) "
-                        + "MERGE (c:Person {gmsfhm: row.child}) "
-                        + "MERGE (p)-[:MOTHER_OF]->(c)", Map.of("rows", mother)).consume();
-            }
-            if (!spouse.isEmpty()) {
-                tx.run("UNWIND $rows AS row "
-                        + "MERGE (a:Person {gmsfhm: row.a}) "
-                        + "MERGE (b:Person {gmsfhm: row.b}) "
-                        + "MERGE (a)-[:MARRIED_TO]->(b)", Map.of("rows", spouse)).consume();
-            }
-            return new Stats(father.size(), mother.size(), spouse.size());
+            return created;
         });
+    }
+
+    /** 生成带“路径可达 guard”的写入语句；关系类型名由枚举内插，不含用户输入。 */
+    private static String buildWriteQuery(Type type, Config config) {
+        String merge = "MERGE (a)-[rel:" + type.relName + "]->(b) ON CREATE SET rel.origin = 'supplement'";
+        if (!config.guardEnabled) {
+            return "UNWIND $rows AS row "
+                    + "MERGE (a:Person {gmsfhm: row.a}) "
+                    + "MERGE (b:Person {gmsfhm: row.b}) "
+                    + "WITH a, b WHERE a <> b "
+                    + merge;
+        }
+        String existsFilter = config.guardIgnoreSupplementEdges
+                ? " WHERE all(r IN relationships(p) WHERE r.origin IS NULL OR r.origin <> 'supplement')"
+                : "";
+        return "UNWIND $rows AS row "
+                + "MERGE (a:Person {gmsfhm: row.a}) "
+                + "MERGE (b:Person {gmsfhm: row.b}) "
+                + "WITH a, b WHERE a <> b "
+                + "AND NOT EXISTS { MATCH p = (a)-[*1.." + config.guardMaxDepth + "]-(b)"
+                + existsFilter + " } "
+                + merge;
     }
 
     private static void logProgress(long total) {
@@ -207,9 +279,11 @@ public class HouseholdRelSupplement {
     }
 
     private static void printSummary(Session session) {
-        System.out.printf("== 库内汇总 ==  Person=%d, FATHER_OF=%d, MOTHER_OF=%d, MARRIED_TO=%d%n",
-                countNodes(session), countRel(session, "FATHER_OF"),
-                countRel(session, "MOTHER_OF"), countRel(session, "MARRIED_TO"));
+        StringBuilder sb = new StringBuilder("== 库内汇总 ==  Person=").append(countNodes(session));
+        for (Type t : Type.values()) {
+            sb.append(", ").append(t.relName).append("=").append(countRel(session, t.relName));
+        }
+        System.out.println(sb);
     }
 
     private static long countNodes(Session session) {
@@ -233,34 +307,39 @@ public class HouseholdRelSupplement {
         return m;
     }
 
-    private enum Type { FATHER, MOTHER, SPOUSE }
+    private enum Type {
+        FATHER_OF("FATHER_OF", false),
+        MOTHER_OF("MOTHER_OF", false),
+        MARRIED_TO("MARRIED_TO", true),
+        SIBLING_OF("SIBLING_OF", true),
+        GRANDPARENT_OF("GRANDPARENT_OF", false),
+        GRANDCHILD_OF("GRANDCHILD_OF", false),
+        MATERNAL_GRANDCHILD_OF("MATERNAL_GRANDCHILD_OF", false),
+        GREAT_GRANDCHILD_OF("GREAT_GRANDCHILD_OF", false),
+        PARENT_SIBLING_OF("PARENT_SIBLING_OF", false),
+        NEPHEW_OF("NEPHEW_OF", false),
+        IN_LAW("IN_LAW", true),
+        OTHER_RELATIVE("OTHER_RELATIVE", true);
+
+        final String relName;
+        final boolean undirected;
+
+        Type(String relName, boolean undirected) {
+            this.relName = relName;
+            this.undirected = undirected;
+        }
+    }
 
     private record Rel(Type type, String a, String b) {
-        static Rel father(String parent, String child) {
-            return new Rel(Type.FATHER, parent, child);
-        }
-
-        static Rel mother(String parent, String child) {
-            return new Rel(Type.MOTHER, parent, child);
-        }
-
-        static Rel spouse(String a, String b) {
-            return new Rel(Type.SPOUSE, a, b);
+        /** 无向关系按 gmsfhm 字典序规范化，保证同一对节点只建一条边。 */
+        static Rel of(Type type, String a, String b) {
+            if (type.undirected && a.compareTo(b) > 0) {
+                return new Rel(type, b, a);
+            }
+            return new Rel(type, a, b);
         }
     }
 
     private record HeadInfo(String gmsfhm, String xbdm) {
-    }
-
-    private static final class Stats {
-        final long father;
-        final long mother;
-        final long spouse;
-
-        Stats(long father, long mother, long spouse) {
-            this.father = father;
-            this.mother = mother;
-            this.spouse = spouse;
-        }
     }
 }
