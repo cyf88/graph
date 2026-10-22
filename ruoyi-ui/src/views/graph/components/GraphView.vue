@@ -81,7 +81,7 @@ const HIERARCHY_TYPES = new Set(['FATHER_OF', 'MOTHER_OF', 'GRANDPARENT_OF', 'PA
 // src 为晚辈的关系，层级布局时需反向（把长辈放上层）
 const REVERSE_HIERARCHY = new Set(['NEPHEW_OF', 'GRANDCHILD_OF', 'MATERNAL_GRANDCHILD_OF', 'GREAT_GRANDCHILD_OF']);
 
-// 根据关系类型 + 源节点性别，计算边的精确中文称谓（src 为标签主语）
+// 根据关系类型 + 长辈性别，计算边的精确中文称谓（标签描述箭头指向的长辈）
 function edgeLabel(type: string, female: boolean): string {
   switch (type) {
     case 'FATHER_OF':
@@ -93,17 +93,17 @@ function edgeLabel(type: string, female: boolean): string {
     case 'SIBLING_OF':
       return '兄弟姐妹';
     case 'GRANDPARENT_OF':
-      return '祖辈';
+      return female ? '祖母' : '祖父';
     case 'GRANDCHILD_OF':
-      return female ? '孙女' : '孙子';
+      return female ? '祖母' : '祖父';
     case 'MATERNAL_GRANDCHILD_OF':
-      return female ? '外孙女' : '外孙';
+      return female ? '外祖母' : '外祖父';
     case 'GREAT_GRANDCHILD_OF':
-      return female ? '曾孙女' : '曾孙';
+      return female ? '曾祖母' : '曾祖父';
     case 'PARENT_SIBLING_OF':
       return female ? '姑/姨' : '伯/叔/舅';
     case 'NEPHEW_OF':
-      return female ? '侄女/外甥女' : '侄子/外甥';
+      return female ? '姑/姨' : '伯/叔/舅';
     case 'IN_LAW':
       return '姻亲';
     case 'OTHER_RELATIVE':
@@ -240,7 +240,8 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
   };
   const childEdges: any[] = [];  // [parent, child, generation]
   for (const e of edges) {
-    if (e.type === 'MARRIED_TO') {
+    if (e.type === 'MARRIED_TO' || e.type === 'SIBLING_OF') {
+      // 配偶与兄弟姐妹合并成同一个家庭单元，保证兄弟姐妹同层展示
       union(e.source, e.target);
     } else if (HIERARCHY_TYPES.has(e.type)) {
       // 长辈 -> 晚辈
@@ -249,7 +250,7 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
       // src 是晚辈，反向把长辈放上层
       childEdges.push([e.target, e.source, GENERATION[e.type] || 1]);
     }
-    // SIBLING_OF / IN_LAW / OTHER_RELATIVE 不参与层级，仅作叠加边
+    // IN_LAW / OTHER_RELATIVE 不参与层级，仅作叠加边
   }
 
   const parentOfChild = new Map();
@@ -523,7 +524,7 @@ function renderGraph() {
     const edge: any = {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: edgeLabel(e.type, xbdmMap.get(e.source) === '2'),
+      label: edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
       style: { stroke: color }
     };
     if (!UNDIRECTED.has(e.type)) {
@@ -578,7 +579,7 @@ function build3dData() {
     return {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: edgeLabel(e.type, xbdmMap.get(e.source) === '2'),
+      label: edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
       color,
       directional: !UNDIRECTED.has(e.type)
     };
