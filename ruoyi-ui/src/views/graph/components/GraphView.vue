@@ -29,6 +29,23 @@ const props = defineProps({
   edges: { type: Array, default: () => [] }
 });
 
+/**
+ * 去重节点：同一身份证号可能返回多条记录，重复 id 会导致 G6 渲染异常、布局坐标缺失
+ */
+function uniqueNodes(): any[] {
+  const map = new Map();
+  for (const n of props.nodes as any[]) {
+    if (!n || n.id == null) continue;
+    const prev = map.get(n.id);
+    if (!prev) {
+      map.set(n.id, n);
+    } else if ((n.center || n.endpoint) && !(prev.center || prev.endpoint)) {
+      map.set(n.id, n);
+    }
+  }
+  return [...map.values()];
+}
+
 const containerRef = ref<HTMLElement | null>(null);
 const threeContainerRef = ref<HTMLElement | null>(null);
 const viewMode = ref('2d');
@@ -189,7 +206,7 @@ const REL_LABELS: Record<string, string> = {
  * 计算族谱树布局
  */
 function computeTreeLayout(nodes: any[], edges: any[]) {
-  const ids = nodes.map((n) => n.id);
+  const ids = [...new Set(nodes.map((n) => n.id))];
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
   // 并查集：配偶 -> 同一家庭单元
@@ -301,7 +318,7 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
   for (const [u, members] of unitMembers) {
     const anchor =
       members.find((m: any) => anchorIds.has(m)) ||
-      members.find((m: any) => parentIds.has(m) && nodeMap.get(m).xbdm === '1') ||
+      members.find((m: any) => parentIds.has(m) && nodeMap.get(m)?.xbdm === '1') ||
       members.find((m: any) => parentIds.has(m)) ||
       members[0];
     unitAnchor.set(u, anchor);
@@ -357,10 +374,17 @@ function computeTreeLayout(nodes: any[], edges: any[]) {
     if (members.length === 1) {
       pos.set(members[0], { x: ax, y });
     } else {
+      // 同一家庭单元可能超过 2 人（重复数据或多次婚姻），逐个分配横向坐标，避免取不到坐标
       const anchor = unitAnchor.get(u);
-      const spouse = members.find((m: any) => m !== anchor);
-      pos.set(anchor, { x: ax, y });
-      pos.set(spouse, { x: ax + colGap, y });
+      let idx = 0;
+      for (const m of members) {
+        if (m === anchor) {
+          pos.set(m, { x: ax, y });
+        } else {
+          idx += 1;
+          pos.set(m, { x: ax + idx * colGap, y });
+        }
+      }
     }
   }
   const minGapX = 110;
@@ -473,10 +497,12 @@ function renderGraph() {
   if (!graph) initGraph();
   if (!graph) return;
 
-  const pos = computeTreeLayout(props.nodes, props.edges);
+  const dataNodes = uniqueNodes();
+  const dataEdges = props.edges as any[];
+  const pos = computeTreeLayout(dataNodes, dataEdges);
 
-  const gNodes = props.nodes.map((n: any) => {
-    const p = pos.get(n.id);
+  const gNodes = dataNodes.map((n: any) => {
+    const p = pos.get(n.id) || { x: 0, y: 0 };
     return {
       id: n.id,
       label: n.yhzgxdm === '02' ? n.name + '（户主）' : n.name,
@@ -490,8 +516,8 @@ function renderGraph() {
     };
   });
 
-  const xbdmMap = new Map(props.nodes.map((n: any) => [n.id, n.xbdm]));
-  const gEdges = props.edges.map((e: any) => {
+  const xbdmMap = new Map(dataNodes.map((n: any) => [n.id, n.xbdm]));
+  const gEdges = dataEdges.map((e: any) => {
     const reverse = ARROW_TO_SENIOR.has(e.type);
     const color = EDGE_COLORS[e.type] || '#888';
     const edge: any = {
@@ -526,8 +552,10 @@ function hashDepth(id: string) {
 }
 
 function build3dData() {
-  const pos = computeTreeLayout(props.nodes, props.edges);
-  const nodes = props.nodes.map((n: any) => {
+  const dataNodes = uniqueNodes();
+  const dataEdges = props.edges as any[];
+  const pos = computeTreeLayout(dataNodes, dataEdges);
+  const nodes = dataNodes.map((n: any) => {
     const p = pos.get(n.id) || { x: 0, y: 0 };
     const gender = n.xbdm === '1' ? '男' : n.xbdm === '2' ? '女' : '-';
     const rel = REL_LABELS[n.yhzgxdm] || n.yhzgxdm || '-';
@@ -543,8 +571,8 @@ function build3dData() {
       rel
     };
   });
-  const xbdmMap = new Map(props.nodes.map((n: any) => [n.id, n.xbdm]));
-  const links = props.edges.map((e: any) => {
+  const xbdmMap = new Map(dataNodes.map((n: any) => [n.id, n.xbdm]));
+  const links = dataEdges.map((e: any) => {
     const reverse = ARROW_TO_SENIOR.has(e.type);
     const color = EDGE_COLORS[e.type] || '#8892a8';
     return {
