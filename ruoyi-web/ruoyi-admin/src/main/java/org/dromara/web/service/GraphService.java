@@ -188,6 +188,26 @@ public class GraphService {
         }
     }
 
+    /** 按姓名或身份证号模糊搜索人员（供 AI 助手 MCP 工具调用） */
+    public List<Map<String, Object>> searchPerson(String keyword) {
+        String query = """
+            MATCH (p:Person)
+            WHERE p.gmsfhm CONTAINS $keyword OR p.xm CONTAINS $keyword
+            RETURN p.gmsfhm AS gmsfhm, p.xm AS name, p.xbdm AS xbdm
+            ORDER BY p.xm
+            LIMIT 20
+            """;
+        try (Session session = driver.session()) {
+            return session.run(query, Map.of("keyword", keyword)).list(record -> {
+                Map<String, Object> m = new HashMap<>();
+                m.put("gmsfhm", record.get("gmsfhm").asString());
+                m.put("name", record.get("name").asString());
+                m.put("xbdm", record.get("xbdm").asString());
+                return m;
+            });
+        }
+    }
+
     private GraphResult getSinglePerson(String gmsfhm) {
         String query = """
             MATCH (n:Person {gmsfhm: $gmsfhm})
