@@ -46,6 +46,18 @@ function uniqueNodes(): any[] {
   return [...map.values()];
 }
 
+/**
+ * 同一对人员同时存在配偶和离异关系时，合并为一条“配偶(离异)”边，避免关系文字重叠
+ */
+function uniqueRelationEdges(edges: any[]): any[] {
+  const pairKey = (e: any) => [e.source, e.target].sort().join('|');
+  const marriedPairs = new Set(edges.filter((e) => e.type === 'MARRIED_TO').map(pairKey));
+  const divorcedPairs = new Set(edges.filter((e) => e.type === 'DIVORCED_FROM').map(pairKey));
+  return edges
+    .filter((e) => !(e.type === 'DIVORCED_FROM' && marriedPairs.has(pairKey(e))))
+    .map((e) => (e.type === 'MARRIED_TO' && divorcedPairs.has(pairKey(e)) ? { ...e, spouseDivorced: true } : e));
+}
+
 const containerRef = ref<HTMLElement | null>(null);
 const threeContainerRef = ref<HTMLElement | null>(null);
 const viewMode = ref('2d');
@@ -61,6 +73,7 @@ const EDGE_COLORS: Record<string, string> = {
   FATHER_OF: '#409EFF',
   MOTHER_OF: '#F56C6C',
   MARRIED_TO: '#E6A23C',
+  DIVORCED_FROM: '#606266',
   SIBLING_OF: '#13C2C2',
   GRANDPARENT_OF: '#722ED1',
   GRANDCHILD_OF: '#9254DE',
@@ -75,7 +88,7 @@ const EDGE_COLORS: Record<string, string> = {
 // 有向关系：src 为长辈，渲染时反转端点，箭头仍指向上层
 const ARROW_TO_SENIOR = new Set(['FATHER_OF', 'MOTHER_OF', 'GRANDPARENT_OF', 'PARENT_SIBLING_OF']);
 // 无向关系：不渲染箭头
-const UNDIRECTED = new Set(['MARRIED_TO', 'SIBLING_OF', 'IN_LAW', 'OTHER_RELATIVE']);
+const UNDIRECTED = new Set(['MARRIED_TO', 'DIVORCED_FROM', 'SIBLING_OF', 'IN_LAW', 'OTHER_RELATIVE']);
 // 参与族谱层级布局的关系（src 为长辈 → [src, target]）
 const HIERARCHY_TYPES = new Set(['FATHER_OF', 'MOTHER_OF', 'GRANDPARENT_OF', 'PARENT_SIBLING_OF']);
 // src 为晚辈的关系，层级布局时需反向（把长辈放上层）
@@ -90,6 +103,8 @@ function edgeLabel(type: string, female: boolean): string {
       return '母亲';
     case 'MARRIED_TO':
       return '配偶';
+    case 'DIVORCED_FROM':
+      return '离异';
     case 'SIBLING_OF':
       return '兄弟姐妹';
     case 'GRANDPARENT_OF':
@@ -499,7 +514,7 @@ function renderGraph() {
   if (!graph) return;
 
   const dataNodes = uniqueNodes();
-  const dataEdges = props.edges as any[];
+  const dataEdges = uniqueRelationEdges(props.edges as any[]);
   const pos = computeTreeLayout(dataNodes, dataEdges);
 
   const gNodes = dataNodes.map((n: any) => {
@@ -524,8 +539,8 @@ function renderGraph() {
     const edge: any = {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
-      style: { stroke: color }
+      label: e.spouseDivorced ? '配偶(离异)' : edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
+      style: e.type === 'DIVORCED_FROM' ? { stroke: color, lineDash: [4, 4] } : { stroke: color }
     };
     if (!UNDIRECTED.has(e.type)) {
       edge.sourceAnchor = 1;
@@ -554,7 +569,7 @@ function hashDepth(id: string) {
 
 function build3dData() {
   const dataNodes = uniqueNodes();
-  const dataEdges = props.edges as any[];
+  const dataEdges = uniqueRelationEdges(props.edges as any[]);
   const pos = computeTreeLayout(dataNodes, dataEdges);
   const nodes = dataNodes.map((n: any) => {
     const p = pos.get(n.id) || { x: 0, y: 0 };
@@ -579,7 +594,7 @@ function build3dData() {
     return {
       source: reverse ? e.target : e.source,
       target: reverse ? e.source : e.target,
-      label: edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
+      label: e.spouseDivorced ? '配偶(离异)' : edgeLabel(e.type, xbdmMap.get(REVERSE_HIERARCHY.has(e.type) ? e.target : e.source) === '2'),
       color,
       directional: !UNDIRECTED.has(e.type)
     };

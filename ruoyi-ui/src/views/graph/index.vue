@@ -115,13 +115,19 @@ function relationToCenter(person: GraphNode): string {
   if (!center) return '-';
   const edges = directResult.value?.edges || [];
   const isParentEdge = (item: any) => item.type === 'FATHER_OF' || item.type === 'MOTHER_OF';
-  const edge = edges.find(
+  const pairEdges = edges.filter(
     (item) => (item.source === center.id && item.target === person.id) || (item.target === center.id && item.source === person.id)
   );
+  if (pairEdges.some((item) => item.type === 'MARRIED_TO') && pairEdges.some((item) => item.type === 'DIVORCED_FROM')) {
+    return '配偶(离异)';
+  }
+  const edge = pairEdges[0];
   if (edge) {
     switch (edge.type) {
       case 'MARRIED_TO':
         return '配偶';
+      case 'DIVORCED_FROM':
+        return '离异';
       case 'FATHER_OF':
       case 'MOTHER_OF': {
         if (edge.target === center.id) return edge.type === 'MOTHER_OF' ? '母亲' : '父亲';

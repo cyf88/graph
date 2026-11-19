@@ -29,6 +29,7 @@ public class GraphService {
         Map.entry("FATHER_OF", "父亲"),
         Map.entry("MOTHER_OF", "母亲"),
         Map.entry("MARRIED_TO", "配偶"),
+        Map.entry("DIVORCED_FROM", "离异"),
         Map.entry("SIBLING_OF", "兄弟姐妹"),
         Map.entry("GRANDPARENT_OF", "祖辈"),
         Map.entry("GRANDCHILD_OF", "孙子/孙女"),
@@ -41,17 +42,18 @@ public class GraphService {
 
     /** 结构性关系（导入器 + 补充工具都会产生） */
     private static final String STRUCT_REL_TYPES = "FATHER_OF|MOTHER_OF|MARRIED_TO";
-    /** 由 relation-supplement 依据“与户主关系”补充的关系类型 */
-    private static final String NEW_REL_TYPES = "SIBLING_OF|GRANDPARENT_OF|GRANDCHILD_OF|MATERNAL_GRANDCHILD_OF|GREAT_GRANDCHILD_OF|PARENT_SIBLING_OF|NEPHEW_OF|IN_LAW|OTHER_RELATIVE";
+    /** 由 relation-supplement / marriage-supplement 补充的关系类型 */
+    private static final String NEW_REL_TYPES = "SIBLING_OF|GRANDPARENT_OF|GRANDCHILD_OF|MATERNAL_GRANDCHILD_OF|GREAT_GRANDCHILD_OF|PARENT_SIBLING_OF|NEPHEW_OF|IN_LAW|OTHER_RELATIVE|DIVORCED_FROM";
     /** 全部关系类型竖线串，用于 Cypher 关系过滤 */
     private static final String REL_TYPES_PATTERN = STRUCT_REL_TYPES + "|" + NEW_REL_TYPES;
     /** 无向关系类型（描述与渲染时不区分方向） */
-    private static final Set<String> UNDIRECTED = Set.of("MARRIED_TO", "SIBLING_OF", "IN_LAW", "OTHER_RELATIVE");
+    private static final Set<String> UNDIRECTED = Set.of("MARRIED_TO", "DIVORCED_FROM", "SIBLING_OF", "IN_LAW", "OTHER_RELATIVE");
 
-    /** 默认模式：查询配偶、父母、子女、兄弟姐妹及其配偶、子女，以及补充的直系/旁系亲属 */
+    /** 默认模式：查询配偶、离异配偶、父母、子女、兄弟姐妹及其配偶、子女，以及补充的直系/旁系亲属 */
     private static final String DEFAULT_DIRECT_QUERY = """
         MATCH (p:Person {gmsfhm: $gmsfhm})
         OPTIONAL MATCH (p)-[:MARRIED_TO]-(sp:Person)
+        OPTIONAL MATCH (p)-[:DIVORCED_FROM]-(ex:Person)
         OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(par:Person)
         OPTIONAL MATCH (p)-[:FATHER_OF|MOTHER_OF]->(child:Person)
         OPTIONAL MATCH (p)<-[:FATHER_OF|MOTHER_OF]-(:Person)-[:FATHER_OF|MOTHER_OF]->(sib:Person)
@@ -60,7 +62,7 @@ public class GraphService {
         OPTIONAL MATCH (sib)-[:FATHER_OF|MOTHER_OF]->(sibChild:Person)
         OPTIONAL MATCH (p)-[:%s]-(nb:Person)
         WITH p,
-          collect(DISTINCT sp) + collect(DISTINCT par) + collect(DISTINCT child)
+          collect(DISTINCT sp) + collect(DISTINCT ex) + collect(DISTINCT par) + collect(DISTINCT child)
             + collect(DISTINCT sib) + collect(DISTINCT sibSpouse) + collect(DISTINCT sibChild)
             + collect(DISTINCT nb) + [p] AS allNodes
         UNWIND allNodes AS n
@@ -105,7 +107,7 @@ public class GraphService {
                 .orElse(gmsfhm);
             String desc;
             if (level == 0) {
-                desc = centerName + " 的亲属（配偶、父母、子女、兄弟姐妹及其配偶、子女、祖父母、伯叔舅姑姨、侄甥、姻亲等）";
+                desc = centerName + " 的亲属（配偶、离异、父母、子女、兄弟姐妹及其配偶、子女、祖父母、伯叔舅姑姨、侄甥、姻亲等）";
             } else if (level < 0) {
                 desc = centerName + " 的全部关联亲属（不限级数）";
             } else {
@@ -271,7 +273,11 @@ public class GraphService {
             String tgt = nameById.getOrDefault(e.target(), e.target());
             String label = e.label();
             if (UNDIRECTED.contains(e.type())) {
-                steps.add(src + " 与 " + tgt + " 是" + label);
+                if ("DIVORCED_FROM".equals(e.type())) {
+                    steps.add(src + " 与 " + tgt + " 已离异");
+                } else {
+                    steps.add(src + " 与 " + tgt + " 是" + label);
+                }
             } else {
                 steps.add(src + " 是 " + tgt + " 的" + label);
             }
