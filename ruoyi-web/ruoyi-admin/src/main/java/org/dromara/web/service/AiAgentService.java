@@ -435,6 +435,10 @@ public class AiAgentService {
                 body.set("params", params);
             }
             JsonNode json = post(body);
+            if (!json.has("jsonrpc")) {
+                // 响应不是 MCP JSON-RPC（如被登录拦截返回 {"code":401,...} 或 SPA 回退返回 HTML）
+                throw new RuntimeException("MCP 服务器返回非预期响应，请检查 /mcp 是否已放行鉴权：" + json);
+            }
             if (json.has("error")) {
                 throw new RuntimeException(json.path("error").path("message").asText("MCP 错误"));
             }
